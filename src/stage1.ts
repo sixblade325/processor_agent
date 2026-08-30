@@ -12,8 +12,10 @@ import {
   slugify,
   writeNewOrSame,
 } from "./io.js";
-import { loadProfile } from "./profile.js";
+import { loadProfile, validateProfile } from "./profile.js";
 import {
+  decisionForCurrentAction,
+  decisionRevisionContext,
   hasCurrentSufficientResearch,
   normalizeResearchRequest,
   researchContextFingerprint,
@@ -22,11 +24,17 @@ import {
 import { renderFormalDocuments } from "./render.js";
 import type {
   DecisionResearchState,
+  DecisionRevisionRecord,
+  DecisionRevisionSnapshot,
   DecisionSpec,
   InitOptions,
   LoadedProfile,
   ArchitectureReviewReport,
+  ArchitectureReviewFinding,
   ProjectProfile,
+  ProjectSpecTarget,
+  ReviewCorrectionRecord,
+  Stage1ProjectSpec,
   Stage1NextAction,
   Stage1ProjectState,
   Stage1Summary,
@@ -44,6 +52,36 @@ export interface ProfileRefreshOptions {
   adoptProfileDefaults?: boolean;
   resetChangedAdvice?: boolean;
 }
+
+export interface ReopenDecisionResult {
+  loaded: LoadedProject;
+  invalidatedDecisionIds: string[];
+}
+
+export interface ReviewCorrectionInput {
+  findingCodes: string[];
+  patch: unknown;
+  rationale: string;
+  sources?: string[];
+}
+
+const PROJECT_SPEC_TARGETS = [
+  "architecture.systemBoundary",
+  "architecture.supportedInstructions",
+  "architecture.invariants",
+  "architecture.sharedFields",
+  "architecture.globalProtocols",
+  "architecture.counterRules",
+  "architecture.modules",
+  "architecture.stage2Order",
+  "verification.referenceModel",
+  "verification.layers",
+  "verification.requiredScenarios",
+  "verification.counters",
+  "verification.decisionAcceptance",
+] as const satisfies readonly ProjectSpecTarget[];
+
+const PROJECT_SPEC_TARGET_SET = new Set<string>(PROJECT_SPEC_TARGETS);
 
 export async function initStage1(
   projectPath: string,
@@ -98,6 +136,10 @@ export async function initStage1(
         profile.decisions.map((decision) => [decision.id, { status: "pending" }]),
       ),
       environment: [],
+      projectSpec: structuredClone({
+        architecture: profile.architecture,
+        verification: profile.verification,
+      }),
       generatedDocumentHashes: {},
       blockers: [],
       history: [],
@@ -151,6 +193,12 @@ export async function refreshStage1Profile(
 ): Promise<LoadedProject> {
   const loaded = await loadStage1(projectPath);
   const { root, state } = loaded;
+  const openFinding = currentOpenReviewFinding(state);
+  if (openFinding !== undefined && openFinding.repairKind !== "profile") {
+    throw new Error(
+      `Profile refresh cannot repair ${openFinding.repairKind} finding ${openFinding.code}`,
+    );
+  }
   if (state.stage1.approval !== undefined || state.stage1.scaffold !== undefined) {
     throw new Error("Profile refresh is prohibited after Stage1 approval or scaffolding");
   }
@@ -170,7 +218,8 @@ export async function refreshStage1Profile(
   for (const [decisionId, decisionState] of Object.entries(state.stage1.decisions)) {
     const carriesUserState = decisionState.status !== "pending"
       || decisionState.advicePath !== undefined
-      || decisionState.research !== undefined;
+      || decisionState.research !== undefined
+      || decisionState.revisions !== undefined;
     if (!carriesUserState) {
       continue;
     }
@@ -211,7 +260,8 @@ export async function refreshStage1Profile(
   state.stage1.decisions = decisions;
   state.project.profile.version = next.profile.version;
   state.project.profile.digest = next.digest;
-  delete state.stage1.review;
+  state.stage1.projectSpec = rebaseProjectSpec(state, next.profile);
+  archiveCurrentReview(state);
   updateDecisionLoopState(state, next.profile);
   await atomicWriteText(
     resolveWithin(root, state.project.profile.snapshot),
@@ -241,7 +291,7 @@ export function findNextDecision(
     }
     return decision.dependsOn.every((dependency) => {
       const status = state.stage1.decisions[dependency]?.status;
-      return status === "answered" || status === "delegated";
+      return status === "answered";
     });
   });
 }
@@ -250,28 +300,138 @@ export function getNextStage1Action(
   state: Stage1ProjectState,
   profile: ProjectProfile,
 ): Stage1NextAction | undefined {
+  const openFinding = state.stage1.review?.findings.find(
+    (finding) => finding.status === "open" || finding.status === undefined,
+  );
+  if (openFinding !== undefined) {
+    if (!hasReviewRepairMetadata(openFinding)) {
+      return {
+        kind: "audit_refresh_required",
+        reason: "当前 audit 报告缺少 repairKind、repairTarget、requiredClosure 或 status，必须重新运行 audit。",
+      };
+    }
+    return { kind: "review_finding", finding: openFinding };
+  }
   const decision = findNextDecision(state, profile);
   if (decision === undefined) {
     return undefined;
   }
+  const actionDecision = decisionForCurrentAction(decision, state);
+  const revision = decisionRevisionContext(decision, state);
   if (decision.researchPolicy !== "required" || hasCurrentSufficientResearch(decision, state)) {
-    return { kind: "decision_ready", decision };
+    return {
+      kind: "decision_ready",
+      decision: actionDecision,
+      ...(revision === undefined ? {} : { revision }),
+    };
   }
   const request = normalizeResearchRequest(decision);
   const contextFingerprint = researchContextFingerprint(decision, state);
   return {
     kind: "research_required",
-    decision,
+    decision: actionDecision,
     request,
     fingerprint: researchRequestFingerprint(contextFingerprint, request),
+    ...(revision === undefined ? {} : { revision }),
   };
+}
+
+export async function reopenDecision(
+  projectPath: string,
+  decisionId: string,
+  reason: string,
+): Promise<ReopenDecisionResult> {
+  const normalizedReason = reason.trim();
+  if (normalizedReason === "") {
+    throw new Error("Reopening a Decision requires a reason");
+  }
+  const loaded = await loadStage1(projectPath);
+  const { root, state } = loaded;
+  const profile = loaded.loadedProfile.profile;
+  assertDecisionMutationAllowed(state, decisionId);
+  await assertGeneratedDocumentsCurrent(root, state);
+  const decision = requireDecision(profile, decisionId);
+  const current = state.stage1.decisions[decision.id];
+  if (current === undefined) {
+    throw new Error(`Decision state missing: ${decision.id}`);
+  }
+  if (current.status === "pending") {
+    throw new Error(`Decision ${decision.id} is already pending`);
+  }
+
+  const at = new Date().toISOString();
+  const revision = state.stage1.revision + 1;
+  const dependents = findTransitiveDependents(profile, decision.id);
+  const staleAdvicePaths = new Set<string>();
+  if (current.advicePath !== undefined) {
+    staleAdvicePaths.add(current.advicePath);
+  }
+  state.stage1.decisions[decision.id] = {
+    status: "pending",
+    revisions: [
+      ...(current.revisions ?? []),
+      decisionRevisionRecord(
+        "reopened",
+        current,
+        decision.id,
+        normalizedReason,
+        at,
+        revision,
+      ),
+    ],
+  };
+
+  for (const dependent of dependents) {
+    const dependentState = state.stage1.decisions[dependent.id];
+    if (dependentState === undefined) {
+      throw new Error(`Decision state missing: ${dependent.id}`);
+    }
+    const carriesInvalidatedState = dependentState.status !== "pending"
+      || dependentState.advicePath !== undefined
+      || dependentState.research !== undefined;
+    if (!carriesInvalidatedState) {
+      continue;
+    }
+    if (dependentState.advicePath !== undefined) {
+      staleAdvicePaths.add(dependentState.advicePath);
+    }
+    state.stage1.decisions[dependent.id] = {
+      status: "pending",
+      revisions: [
+        ...(dependentState.revisions ?? []),
+        decisionRevisionRecord(
+          "dependency_invalidated",
+          dependentState,
+          decision.id,
+          normalizedReason,
+          at,
+          revision,
+        ),
+      ],
+    };
+  }
+
+  archiveCurrentReview(state);
+  updateDecisionLoopState(state, profile);
+  const invalidatedDecisionIds = dependents.map((item) => item.id);
+  recordEvent(
+    state,
+    "DECISION_REOPENED",
+    JSON.stringify({ decisionId, reason: normalizedReason, invalidatedDecisionIds }),
+  );
+  await syncFormalDocuments(root, state, profile, true);
+  for (const path of staleAdvicePaths) {
+    await removeFileAndEmptyParents(root, path);
+  }
+  await saveState(root, state);
+  return { loaded, invalidatedDecisionIds };
 }
 
 export async function answerDecision(
   projectPath: string,
   decisionId: string,
   optionId: string,
-  options: { note?: string; delegated?: boolean } = {},
+  note?: string,
 ): Promise<LoadedProject> {
   const loaded = await loadStage1(projectPath);
   const { root, state } = loaded;
@@ -280,22 +440,26 @@ export async function answerDecision(
   await assertGeneratedDocumentsCurrent(root, state);
   const decision = requireDecision(profile, decisionId);
   assertDependenciesClosed(state, decision);
+  assertDecisionPending(state, decision);
   await assertRequiredResearchComplete(root, state, decision);
   const option = decision.options.find((candidate) => candidate.id === optionId);
   if (option === undefined) {
     throw new Error(`Unknown option ${optionId} for ${decisionId}`);
   }
-  const advicePath = state.stage1.decisions[decisionId]?.advicePath;
-  const research = state.stage1.decisions[decisionId]?.research;
+  const current = state.stage1.decisions[decisionId];
+  const advicePath = current?.advicePath;
+  const research = current?.research;
+  const revisions = current?.revisions;
   state.stage1.decisions[decisionId] = {
-    status: options.delegated ? "delegated" : "answered",
+    status: "answered",
     selectedOption: optionId,
     answeredAt: new Date().toISOString(),
-    ...(options.note === undefined ? {} : { note: options.note }),
+    ...(note === undefined ? {} : { note }),
     ...(advicePath === undefined ? {} : { advicePath }),
     ...(research === undefined ? {} : { research }),
+    ...(revisions === undefined ? {} : { revisions }),
   };
-  delete state.stage1.review;
+  archiveCurrentReview(state);
   updateDecisionLoopState(state, profile);
   recordEvent(state, "DECISION_ANSWERED", `${decisionId}=${optionId}`);
   await syncFormalDocuments(root, state, profile, true);
@@ -319,9 +483,12 @@ export async function answerCustomDecision(
   await assertGeneratedDocumentsCurrent(root, state);
   const decision = requireDecision(profile, decisionId);
   assertDependenciesClosed(state, decision);
+  assertDecisionPending(state, decision);
   await assertRequiredResearchComplete(root, state, decision);
-  const advicePath = state.stage1.decisions[decisionId]?.advicePath;
-  const research = state.stage1.decisions[decisionId]?.research;
+  const current = state.stage1.decisions[decisionId];
+  const advicePath = current?.advicePath;
+  const research = current?.research;
+  const revisions = current?.revisions;
   state.stage1.decisions[decisionId] = {
     status: "answered",
     customAnswer: answer.trim(),
@@ -329,8 +496,9 @@ export async function answerCustomDecision(
     ...(note === undefined ? {} : { note }),
     ...(advicePath === undefined ? {} : { advicePath }),
     ...(research === undefined ? {} : { research }),
+    ...(revisions === undefined ? {} : { revisions }),
   };
-  delete state.stage1.review;
+  archiveCurrentReview(state);
   updateDecisionLoopState(state, profile);
   recordEvent(state, "DECISION_ANSWERED_CUSTOM", decisionId);
   await syncFormalDocuments(root, state, profile, true);
@@ -354,9 +522,12 @@ export async function deferDecision(
   await assertGeneratedDocumentsCurrent(root, state);
   const decision = requireDecision(profile, decisionId);
   assertDependenciesClosed(state, decision);
+  assertDecisionPending(state, decision);
   await assertRequiredResearchComplete(root, state, decision);
-  const advicePath = state.stage1.decisions[decisionId]?.advicePath;
-  const research = state.stage1.decisions[decisionId]?.research;
+  const current = state.stage1.decisions[decisionId];
+  const advicePath = current?.advicePath;
+  const research = current?.research;
+  const revisions = current?.revisions;
   state.stage1.decisions[decisionId] = {
     status: "deferred",
     deferredUntil: deferredUntil.trim(),
@@ -364,8 +535,9 @@ export async function deferDecision(
     answeredAt: new Date().toISOString(),
     ...(advicePath === undefined ? {} : { advicePath }),
     ...(research === undefined ? {} : { research }),
+    ...(revisions === undefined ? {} : { revisions }),
   };
-  delete state.stage1.review;
+  archiveCurrentReview(state);
   updateDecisionLoopState(state, profile);
   recordEvent(state, "DECISION_DEFERRED", decisionId);
   await syncFormalDocuments(root, state, profile, true);
@@ -378,9 +550,10 @@ export async function probeEnvironment(projectPath: string): Promise<LoadedProje
   const { root, state } = loaded;
   const profile = loaded.loadedProfile.profile;
   assertArchitectureNotApproved(state, "Environment probing");
+  assertNoOpenReviewFinding(state, "Environment probing");
   await assertGeneratedDocumentsCurrent(root, state);
   state.stage1.environment = runCommands(profile.environmentChecks, root);
-  delete state.stage1.review;
+  archiveCurrentReview(state);
   const failures = requiredFailures(state.stage1.environment);
   state.stage1.blockers = failures;
   if (failures.length > 0) {
@@ -402,13 +575,14 @@ export async function reviewStage1(projectPath: string): Promise<LoadedProject> 
   const { root, state } = loaded;
   const profile = loaded.loadedProfile.profile;
   assertArchitectureNotApproved(state, "Stage1 review");
+  assertNoOpenReviewFinding(state, "Stage1 review");
   await assertGeneratedDocumentsCurrent(root, state);
   const blockers = stage1GateBlockers(state, profile);
   if (blockers.length > 0) {
     throw new Error(`Stage1 review blocked:\n${blockers.map((item) => `- ${item}`).join("\n")}`);
   }
   state.stage1.status = "ARCHITECTURE_REVIEW";
-  delete state.stage1.review;
+  archiveCurrentReview(state);
   state.stage1.blockers = [];
   recordEvent(state, "ARCHITECTURE_REVIEW_READY");
   await syncFormalDocuments(root, state, profile, true);
@@ -438,6 +612,14 @@ export async function approveStage1(projectPath: string): Promise<LoadedProject>
   const currentReviewHash = aggregateHashes(state.stage1.generatedDocumentHashes);
   if (review.reviewedAggregateSha256 !== currentReviewHash) {
     throw new Error("Stage1 documents changed after the independent architecture audit");
+  }
+  const unverifiedCorrections = (state.stage1.reviewCorrections ?? []).filter(
+    (correction) => correction.status !== "verified",
+  );
+  if (unverifiedCorrections.length > 0) {
+    throw new Error(
+      `Stage1 has unverified Review Corrections: ${unverifiedCorrections.map((item) => item.id).join(", ")}`,
+    );
   }
   state.stage1.status = "ARCHITECTURE_APPROVED";
   recordEvent(state, "ARCHITECTURE_APPROVED");
@@ -529,7 +711,7 @@ export async function summarizeStage1(loaded: LoadedProject): Promise<Stage1Summ
     profile: `${state.project.profile.id}@${state.project.profile.version}`,
     status: effectiveStatus,
     revision: state.stage1.revision,
-    answered: values.filter((item) => item.status === "answered" || item.status === "delegated").length,
+    answered: values.filter((item) => item.status === "answered").length,
     pending: values.filter((item) => item.status === "pending").length,
     deferred: values.filter((item) => item.status === "deferred").length,
     blockers: effectiveBlockers,
@@ -538,7 +720,9 @@ export async function summarizeStage1(loaded: LoadedProject): Promise<Stage1Summ
   const nextAction = getNextStage1Action(state, profile);
   if (nextAction !== undefined) {
     summary.nextAction = nextAction;
-    summary.nextDecision = nextAction.decision;
+    if (nextAction.kind === "decision_ready" || nextAction.kind === "research_required") {
+      summary.nextDecision = nextAction.decision;
+    }
   }
   return summary;
 }
@@ -579,7 +763,7 @@ export async function saveDecisionAdvice(
   if (research !== undefined) {
     current.research = research;
   }
-  delete state.stage1.review;
+  archiveCurrentReview(state);
   recordEvent(state, "DECISION_ADVICE_RECORDED", decisionId);
   await syncFormalDocuments(root, state, profile, true);
   await saveState(root, state);
@@ -592,6 +776,7 @@ export async function saveArchitectureReview(
 ): Promise<LoadedProject> {
   const loaded = await loadStage1(projectPath);
   const { root, state } = loaded;
+  const profile = loaded.loadedProfile.profile;
   if (state.stage1.status !== "ARCHITECTURE_REVIEW") {
     throw new Error(`Architecture audit requires ARCHITECTURE_REVIEW, current state is ${state.stage1.status}`);
   }
@@ -600,24 +785,359 @@ export async function saveArchitectureReview(
   if (report.reviewedAggregateSha256 !== currentHash) {
     throw new Error("Architecture audit does not match the current Stage1 documents");
   }
+  validateArchitectureReviewReport(report, profile);
   const reportPath = ".assistant/reviews/stage1.json";
   await atomicWriteText(
     resolveWithin(root, reportPath),
     `${JSON.stringify(report, null, 2)}\n`,
   );
+  archiveCurrentReview(state);
   state.stage1.review = {
     ...report,
     reviewedAt: new Date().toISOString(),
     revision: state.stage1.revision,
     reportPath,
   };
+  if (report.verdict === "pass") {
+    for (const correction of state.stage1.reviewCorrections ?? []) {
+      if (correction.status === "applied") {
+        correction.status = "verified";
+        correction.verifiedByAuditAggregateSha256 = currentHash;
+      }
+    }
+    state.stage1.status = "ARCHITECTURE_REVIEW";
+    state.stage1.blockers = [];
+  } else {
+    setStatusForReviewFinding(state, report.findings[0]);
+  }
   recordEvent(state, "ARCHITECTURE_AUDITED", report.verdict);
+  await saveState(root, state);
+  return loaded;
+}
+
+export async function applyReviewCorrection(
+  projectPath: string,
+  input: ReviewCorrectionInput,
+): Promise<LoadedProject> {
+  const findingCodes = [...new Set(input.findingCodes.map((code) => code.trim()))].filter(Boolean);
+  const rationale = input.rationale.trim();
+  const sources = [...new Set((input.sources ?? []).map((source) => source.trim()))].filter(Boolean);
+  if (findingCodes.length === 0) {
+    throw new Error("Review Correction requires at least one finding code");
+  }
+  if (rationale === "") {
+    throw new Error("Review Correction requires a rationale");
+  }
+  if (sources.length === 0) {
+    throw new Error("Review Correction requires at least one source");
+  }
+
+  const loaded = await loadStage1(projectPath);
+  const { root, state } = loaded;
+  const profile = loaded.loadedProfile.profile;
+  assertArchitectureNotApproved(state, "Review Correction");
+  await assertGeneratedDocumentsCurrent(root, state);
+  const review = state.stage1.review;
+  if (review === undefined || review.verdict !== "fail") {
+    throw new Error("Review Correction requires a failed architecture audit");
+  }
+  const findings = findingCodes.map((code) => {
+    const finding = review.findings.find((item) => item.code === code);
+    if (finding === undefined) {
+      throw new Error(`Unknown audit finding: ${code}`);
+    }
+    if (finding.status !== "open") {
+      throw new Error(`Audit finding ${code} is not open`);
+    }
+    if (finding.repairKind !== "project_spec") {
+      throw new Error(`Audit finding ${code} must be repaired through ${finding.repairKind}`);
+    }
+    if (!isProjectSpecTarget(finding.repairTarget)) {
+      throw new Error(`Audit finding ${code} has invalid project_spec target ${finding.repairTarget}`);
+    }
+    return finding;
+  });
+
+  const patchEntries = normalizeProjectSpecPatch(input.patch);
+  const patchedTargets = new Set(patchEntries.map((entry) => entry.target));
+  for (const finding of findings) {
+    if (!patchedTargets.has(finding.repairTarget as ProjectSpecTarget)) {
+      throw new Error(
+        `Review Correction for ${finding.code} must update ${finding.repairTarget}`,
+      );
+    }
+  }
+
+  const currentSpec = effectiveProjectSpec(state, profile);
+  const candidate = structuredClone(currentSpec);
+  for (const entry of patchEntries) {
+    setProjectSpecTarget(candidate, entry.target, entry.value);
+  }
+  const normalizedProfile = validateProfile({
+    ...structuredClone(profile),
+    architecture: candidate.architecture,
+    verification: candidate.verification,
+  });
+  const normalizedSpec: Stage1ProjectSpec = {
+    architecture: normalizedProfile.architecture,
+    verification: normalizedProfile.verification,
+  };
+  const changes = patchEntries
+    .map((entry) => ({
+      target: entry.target,
+      previousValue: structuredClone(getProjectSpecTarget(currentSpec, entry.target)),
+      nextValue: structuredClone(getProjectSpecTarget(normalizedSpec, entry.target)),
+    }))
+    .filter((change) => !sameValue(change.previousValue, change.nextValue));
+  if (changes.length === 0) {
+    throw new Error("Review Correction patch does not change project facts");
+  }
+
+  const timestamp = new Date().toISOString();
+  const correctionNumber = (state.stage1.reviewCorrections?.length ?? 0) + 1;
+  const correction: ReviewCorrectionRecord = {
+    id: `S1_CORR_${String(correctionNumber).padStart(3, "0")}`,
+    findingCodes,
+    repairKind: "project_spec",
+    repairTargets: changes.map((change) => change.target),
+    requiredClosure: [...new Set(findings.flatMap((finding) => finding.requiredClosure))],
+    changes,
+    rationale,
+    sources,
+    confirmedAt: timestamp,
+    appliedAt: timestamp,
+    status: "applied",
+    sourceAuditAggregateSha256: review.reviewedAggregateSha256,
+  };
+  state.stage1.projectSpec = normalizedSpec;
+  state.stage1.reviewCorrections = [...(state.stage1.reviewCorrections ?? []), correction];
+  for (const finding of findings) {
+    finding.status = "superseded";
+  }
+  recordEvent(
+    state,
+    "REVIEW_CORRECTION_APPLIED",
+    JSON.stringify({ correctionId: correction.id, findingCodes, targets: correction.repairTargets }),
+  );
+  await syncFormalDocuments(root, state, profile, true);
+
+  const nextFinding = review.findings.find((finding) => finding.status === "open");
+  await atomicWriteText(
+    resolveWithin(root, review.reportPath),
+    `${JSON.stringify(reviewReportPayload(review), null, 2)}\n`,
+  );
+  if (nextFinding === undefined) {
+    archiveCurrentReview(state);
+    state.stage1.status = "ARCHITECTURE_REVIEW";
+    state.stage1.blockers = [];
+  } else {
+    setStatusForReviewFinding(state, nextFinding);
+  }
   await saveState(root, state);
   return loaded;
 }
 
 export function currentGeneratedAggregate(state: Stage1ProjectState): string {
   return aggregateHashes(state.stage1.generatedDocumentHashes);
+}
+
+function effectiveProjectSpec(
+  state: Stage1ProjectState,
+  profile: ProjectProfile,
+): Stage1ProjectSpec {
+  return structuredClone(state.stage1.projectSpec ?? {
+    architecture: profile.architecture,
+    verification: profile.verification,
+  });
+}
+
+function rebaseProjectSpec(
+  state: Stage1ProjectState,
+  profile: ProjectProfile,
+): Stage1ProjectSpec {
+  const candidate: Stage1ProjectSpec = structuredClone({
+    architecture: profile.architecture,
+    verification: profile.verification,
+  });
+  for (const correction of state.stage1.reviewCorrections ?? []) {
+    for (const change of correction.changes) {
+      setProjectSpecTarget(candidate, change.target, structuredClone(change.nextValue));
+    }
+  }
+  const normalized = validateProfile({
+    ...structuredClone(profile),
+    architecture: candidate.architecture,
+    verification: candidate.verification,
+  });
+  return {
+    architecture: normalized.architecture,
+    verification: normalized.verification,
+  };
+}
+
+function archiveCurrentReview(state: Stage1ProjectState): void {
+  const review = state.stage1.review;
+  if (review === undefined) {
+    return;
+  }
+  const history = state.stage1.reviewHistory ?? [];
+  const duplicate = history.some(
+    (item) => item.reviewedAt === review.reviewedAt
+      && item.reviewedAggregateSha256 === review.reviewedAggregateSha256,
+  );
+  if (!duplicate) {
+    history.push(structuredClone(review));
+  }
+  state.stage1.reviewHistory = history;
+  delete state.stage1.review;
+}
+
+function hasReviewRepairMetadata(finding: ArchitectureReviewFinding): boolean {
+  return (
+    ["decision", "project_spec", "profile"].includes(finding.repairKind)
+    && typeof finding.repairTarget === "string"
+    && finding.repairTarget.trim() !== ""
+    && Array.isArray(finding.requiredClosure)
+    && finding.requiredClosure.length > 0
+    && (finding.status === "open" || finding.status === "superseded")
+  );
+}
+
+function validateArchitectureReviewReport(
+  report: ArchitectureReviewReport,
+  profile: ProjectProfile,
+): void {
+  if (report.summary.trim() === "") {
+    throw new Error("Architecture audit summary must not be empty");
+  }
+  if (report.verdict === "pass" && report.findings.length > 0) {
+    throw new Error("A passing architecture audit must not contain findings");
+  }
+  if (report.verdict === "fail" && report.findings.length === 0) {
+    throw new Error("A failing architecture audit must contain at least one finding");
+  }
+  const decisionIds = new Set(profile.decisions.map((decision) => decision.id));
+  const codes = new Set<string>();
+  for (const finding of report.findings) {
+    if (finding.code.trim() === "" || codes.has(finding.code)) {
+      throw new Error(`Architecture audit finding code is empty or duplicated: ${finding.code}`);
+    }
+    codes.add(finding.code);
+    if (
+      finding.message.trim() === ""
+      || finding.artifact.trim() === ""
+      || !hasReviewRepairMetadata(finding)
+      || finding.status !== "open"
+    ) {
+      throw new Error(`Architecture audit finding ${finding.code} is incomplete`);
+    }
+    if (finding.requiredClosure.some((item) => item.trim() === "")) {
+      throw new Error(`Architecture audit finding ${finding.code} has an empty closure item`);
+    }
+    if (finding.repairKind === "decision") {
+      if (!decisionIds.has(finding.relatedDecision)) {
+        throw new Error(`Architecture audit finding ${finding.code} references an unknown Decision`);
+      }
+      if (finding.repairTarget !== finding.relatedDecision) {
+        throw new Error(`Decision finding ${finding.code} must target ${finding.relatedDecision}`);
+      }
+    } else if (finding.repairKind === "project_spec") {
+      if (!isProjectSpecTarget(finding.repairTarget)) {
+        throw new Error(
+          `Project-spec finding ${finding.code} has unsupported target ${finding.repairTarget}`,
+        );
+      }
+      if (finding.relatedDecision !== "" && !decisionIds.has(finding.relatedDecision)) {
+        throw new Error(`Architecture audit finding ${finding.code} references an unknown Decision`);
+      }
+    } else if (!finding.repairTarget.startsWith("profile.")) {
+      throw new Error(`Profile finding ${finding.code} must use a profile.* target`);
+    }
+  }
+}
+
+function setStatusForReviewFinding(
+  state: Stage1ProjectState,
+  finding: ArchitectureReviewFinding | undefined,
+): void {
+  if (finding === undefined) {
+    throw new Error("Failed architecture audit has no open finding");
+  }
+  if (finding.repairKind === "project_spec") {
+    state.stage1.status = "REVIEW_CORRECTION";
+    state.stage1.blockers = [];
+  } else if (finding.repairKind === "decision") {
+    state.stage1.status = "DECISION_LOOP";
+    state.stage1.blockers = [];
+  } else {
+    state.stage1.status = "NEEDS_REVISION";
+    state.stage1.blockers = [
+      `Profile repair required for ${finding.code}: ${finding.repairTarget}`,
+    ];
+  }
+}
+
+function normalizeProjectSpecPatch(
+  value: unknown,
+): Array<{ target: ProjectSpecTarget; value: unknown }> {
+  const root = objectRecord(value, "Review Correction patch");
+  const rootKeys = Object.keys(root);
+  if (rootKeys.length === 0) {
+    throw new Error("Review Correction patch must not be empty");
+  }
+  const unknownRoot = rootKeys.find((key) => key !== "architecture" && key !== "verification");
+  if (unknownRoot !== undefined) {
+    throw new Error(`Review Correction patch has unsupported section ${unknownRoot}`);
+  }
+  const entries: Array<{ target: ProjectSpecTarget; value: unknown }> = [];
+  for (const sectionName of rootKeys) {
+    const section = objectRecord(root[sectionName], `Review Correction patch.${sectionName}`);
+    for (const [field, fieldValue] of Object.entries(section)) {
+      const target = `${sectionName}.${field}`;
+      if (!isProjectSpecTarget(target)) {
+        throw new Error(`Review Correction patch has unsupported target ${target}`);
+      }
+      entries.push({ target, value: fieldValue });
+    }
+  }
+  if (entries.length === 0) {
+    throw new Error("Review Correction patch must update at least one field");
+  }
+  return entries;
+}
+
+function isProjectSpecTarget(value: string): value is ProjectSpecTarget {
+  return PROJECT_SPEC_TARGET_SET.has(value);
+}
+
+function getProjectSpecTarget(spec: Stage1ProjectSpec, target: ProjectSpecTarget): unknown {
+  const [section, field] = target.split(".") as ["architecture" | "verification", string];
+  return (spec[section] as unknown as Record<string, unknown>)[field];
+}
+
+function setProjectSpecTarget(
+  spec: Stage1ProjectSpec,
+  target: ProjectSpecTarget,
+  value: unknown,
+): void {
+  const [section, field] = target.split(".") as ["architecture" | "verification", string];
+  (spec[section] as unknown as Record<string, unknown>)[field] = value;
+}
+
+function objectRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${label} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function reviewReportPayload(review: NonNullable<Stage1ProjectState["stage1"]["review"]>): ArchitectureReviewReport {
+  return {
+    reviewedAggregateSha256: review.reviewedAggregateSha256,
+    verdict: review.verdict,
+    summary: review.summary,
+    findings: review.findings,
+  };
 }
 
 async function assertFormalFilesAbsent(root: string): Promise<void> {
@@ -672,9 +1192,10 @@ async function ensureProjectRules(root: string): Promise<void> {
 1. \`architecture/\` 由用户批准。Agent 可以生成草案，不能自行把草案标记为已批准。
 2. \`design/\` 由用户和 Agent 共同维护，负责把架构要求落实到模块、字段、接口、周期和验证点。
 3. \`src/\` 与 \`verification/\` 是正式项目资产。源码修改必须关联已闭合的 Design 和验收条件。
-4. \`experiments/\` 只保存可复现并经过确认的结论。
-5. \`.assistant/\` 由 Processor Agent 维护。用户和普通实现任务不得手工修改其中的状态、哈希和审批记录。
-6. 同一事实只保留一个权威正文，其他位置使用摘要和链接。
+4. 每个 Module ID 只对应一份 Design。每个源码和测试路径只允许一个 Module ID 拥有，路径归属由已批准 Design 声明。
+5. \`experiments/\` 只保存可复现并经过确认的结论。
+6. \`.assistant/\` 由 Processor Agent 维护。用户和普通实现任务不得手工修改其中的状态、哈希和审批记录。
+7. 同一事实只保留一个权威正文，其他位置使用摘要和链接。
 
 ## 3. 设计闭合要求
 
@@ -746,9 +1267,20 @@ async function ensureProjectRules(root: string): Promise<void> {
 4. \`next\` 返回 \`research_required\` 时，必须先调用 \`processor-agent stage1 research\`，证据充分后才能提交该 Decision。
 5. 用户要求研究仓库、论文、URL 或源码范围时，必须把问题和来源交给 Harness Research Task。影响正式决策的来源调研不得只存在于 Workspace Agent 主上下文。
 6. Research Worker 负责来源与事实，Synthesis Worker 只基于结构化 Evidence 比较候选项。正式输出必须记录 cacheHit、fingerprint、runId、worker thread id 和 evidenceSufficient。
-7. Agent 推荐不能视为用户批准。\`approve\`、delegated decision 和自定义架构结论都要求用户明确授权。
-8. Harness 命令失败时保留当前状态并报告恢复条件，不得手工修改状态或哈希。
-9. Workspace Agent 内不得递归调用 \`processor-agent open\`。
+7. 用户修正已关闭 Decision 时必须调用 \`processor-agent stage1 reopen\` 并记录原因。Harness 自动使目标和全部传递依赖 Decision 的旧 advice 失效，随后按 \`next\` 逐项重新确认。
+8. 修正模式必须以此前结论为基线，只处理修正原因指出的缺口。Profile 候选项只作参考，未被新证据否定的既有内容继续保留。
+9. \`next.decision.recommendation=revise_previous\` 时，用户确认后通过 \`custom\` 提交 \`next.revision.proposedCustomAnswer\`。该字段缺失时先与用户闭合完整修订结论；用户明确确认原结论不变时可以按原结论提交。不得由 Agent 自行选择 Profile 默认项。
+10. Agent 推荐不能视为用户回答或 Architecture Approval。推荐选项和自定义架构结论只有在用户明确确认后才能通过 Harness 提交，\`approve\` 也要求用户明确授权。
+11. Harness 命令失败时保留当前状态并报告恢复条件，不得手工修改状态或哈希。
+12. Workspace Agent 内不得递归调用 \`processor-agent open\`。
+13. Stage2 状态、Design 投影、实现写入、验证证据和角色轮转必须调用 \`processor-agent stage2 ...\`，不得手工修改 \`.assistant/project.yaml\`。
+14. Shadow Align 无源码和测试写权限。Active Coding 只能提交已批准 Design 中列出的源码和测试路径，已批准 Design 对 Active 只读。
+15. 每个模块批准 Design 时都必须由用户明确选择 \`independent_workers\` 或 \`active_only\`，不得继承其他模块的选择。
+16. \`independent_workers\` 启动独立 Static Review Worker 与 Verification Worker。\`active_only\` 的证据必须标记为非独立验证。
+17. Agent 不能根据模块名、最近修改或对话历史猜测角色。每次执行以 Harness Task Envelope 中的 role、lease、state epoch、哈希和允许路径为准。
+18. 实现发现 Design 缺口时必须运行 \`stage2 reopen\`，停止源码写入并记录反例。不得自行补充协议、状态或保守限制。
+19. 编译、主验证、静态审查和验证审查全部通过后，模块才能进入 \`COMPLETE\`。
+20. 双 Agent 轮转由 Harness 原子更新，Agent 不得直接修改自己或另一 Agent 的 assignment。
 `;
   await writeNewOrSame(path, content);
 }
@@ -875,6 +1407,10 @@ async function readState(root: string): Promise<Stage1ProjectState> {
 
 async function saveState(root: string, state: Stage1ProjectState): Promise<void> {
   state.stage1.updatedAt = new Date().toISOString();
+  await saveProjectState(root, state);
+}
+
+export async function saveProjectState(root: string, state: Stage1ProjectState): Promise<void> {
   await atomicWriteText(
     resolveWithin(root, STATE_PATH),
     stringify(state, { lineWidth: 0 }),
@@ -890,7 +1426,7 @@ function updateDecisionLoopState(state: Stage1ProjectState, profile: ProjectProf
   }
   const allDecisionsClosed = profile.decisions.every((decision) => {
     const status = state.stage1.decisions[decision.id]?.status;
-    return status === "answered" || status === "delegated" || (!decision.blocking && status === "deferred");
+    return status === "answered" || (!decision.blocking && status === "deferred");
   });
   state.stage1.status = allDecisionsClosed ? "ARCHITECTURE_REVIEW" : "DECISION_LOOP";
   state.stage1.blockers = [];
@@ -900,11 +1436,11 @@ function stage1GateBlockers(state: Stage1ProjectState, profile: ProjectProfile):
   const blockers = environmentGateBlockers(state, profile);
   for (const decision of profile.decisions) {
     const status = state.stage1.decisions[decision.id]?.status;
-    if (decision.blocking && status !== "answered" && status !== "delegated") {
+    if (decision.blocking && status !== "answered") {
       blockers.push(`${decision.id} is a blocking decision with status ${status ?? "missing"}`);
     }
     if (!decision.blocking && status === "pending") {
-      blockers.push(`${decision.id} must be answered, delegated, or explicitly deferred`);
+      blockers.push(`${decision.id} must be answered or explicitly deferred`);
     }
     if (status === "deferred") {
       const item = state.stage1.decisions[decision.id];
@@ -937,13 +1473,42 @@ function requiredFailures(results: Stage1ProjectState["stage1"]["environment"]):
     .map((result) => `${result.id}: ${result.output || `exit ${String(result.exitCode)}`}`);
 }
 
-function assertDecisionMutationAllowed(state: Stage1ProjectState): void {
+function assertDecisionMutationAllowed(
+  state: Stage1ProjectState,
+  reviewReopenDecisionId?: string,
+): void {
   if (state.stage1.approval !== undefined) {
     throw new Error("Architecture is already approved; reopen Stage1 before changing decisions");
   }
   if (["PROJECT_SCAFFOLDED", "STAGE1_COMPLETE", "CANCELLED"].includes(state.stage1.status)) {
     throw new Error(`Decisions cannot change in state ${state.stage1.status}`);
   }
+  const finding = currentOpenReviewFinding(state);
+  if (finding !== undefined) {
+    const allowedReopen = reviewReopenDecisionId !== undefined
+      && finding.repairKind === "decision"
+      && finding.repairTarget === reviewReopenDecisionId;
+    if (!allowedReopen) {
+      throw new Error(
+        `Open audit finding ${finding.code} must be repaired through ${finding.repairKind}`,
+      );
+    }
+  }
+}
+
+function assertNoOpenReviewFinding(state: Stage1ProjectState, action: string): void {
+  const finding = currentOpenReviewFinding(state);
+  if (finding !== undefined) {
+    throw new Error(`${action} is blocked by open audit finding ${finding.code}`);
+  }
+}
+
+function currentOpenReviewFinding(
+  state: Stage1ProjectState,
+): ArchitectureReviewFinding | undefined {
+  return state.stage1.review?.findings.find(
+    (finding) => finding.status === "open" || finding.status === undefined,
+  );
 }
 
 function assertArchitectureNotApproved(state: Stage1ProjectState, action: string): void {
@@ -955,10 +1520,19 @@ function assertArchitectureNotApproved(state: Stage1ProjectState, action: string
 function assertDependenciesClosed(state: Stage1ProjectState, decision: DecisionSpec): void {
   const open = decision.dependsOn.filter((dependency) => {
     const status = state.stage1.decisions[dependency]?.status;
-    return status !== "answered" && status !== "delegated";
+    return status !== "answered";
   });
   if (open.length > 0) {
     throw new Error(`Decision ${decision.id} has unresolved dependencies: ${open.join(", ")}`);
+  }
+}
+
+function assertDecisionPending(state: Stage1ProjectState, decision: DecisionSpec): void {
+  const status = state.stage1.decisions[decision.id]?.status;
+  if (status !== "pending") {
+    throw new Error(
+      `Decision ${decision.id} has status ${status ?? "missing"}; run stage1 reopen before changing it`,
+    );
   }
 }
 
@@ -997,6 +1571,62 @@ function requireDecision(profile: ProjectProfile, decisionId: string): DecisionS
     throw new Error(`Unknown decision: ${decisionId}`);
   }
   return decision;
+}
+
+function findTransitiveDependents(
+  profile: ProjectProfile,
+  decisionId: string,
+): DecisionSpec[] {
+  const affected = new Set<string>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const decision of profile.decisions) {
+      if (affected.has(decision.id) || decision.id === decisionId) {
+        continue;
+      }
+      if (decision.dependsOn.some((dependency) => dependency === decisionId || affected.has(dependency))) {
+        affected.add(decision.id);
+        changed = true;
+      }
+    }
+  }
+  return profile.decisions.filter((decision) => affected.has(decision.id));
+}
+
+function decisionRevisionRecord(
+  kind: DecisionRevisionRecord["kind"],
+  previous: Stage1ProjectState["stage1"]["decisions"][string],
+  causeDecisionId: string,
+  reason: string,
+  at: string,
+  revision: number,
+): DecisionRevisionRecord {
+  return {
+    kind,
+    at,
+    revision,
+    reason,
+    causeDecisionId,
+    previous: decisionRevisionSnapshot(previous),
+  };
+}
+
+function decisionRevisionSnapshot(
+  state: Stage1ProjectState["stage1"]["decisions"][string],
+): DecisionRevisionSnapshot {
+  return {
+    status: state.status,
+    ...(state.selectedOption === undefined ? {} : { selectedOption: state.selectedOption }),
+    ...(state.customAnswer === undefined ? {} : { customAnswer: state.customAnswer }),
+    ...(state.note === undefined ? {} : { note: state.note }),
+    ...(state.deferredUntil === undefined ? {} : { deferredUntil: state.deferredUntil }),
+    ...(state.answeredAt === undefined ? {} : { answeredAt: state.answeredAt }),
+    ...(state.advicePath === undefined ? {} : { advicePath: state.advicePath }),
+    ...(state.research?.fingerprint === undefined
+      ? {}
+      : { researchFingerprint: state.research.fingerprint }),
+  };
 }
 
 function aggregateHashes(hashes: Record<string, string>): string {

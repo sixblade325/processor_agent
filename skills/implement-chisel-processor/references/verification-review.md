@@ -2,7 +2,7 @@
 
 ## Primary verification
 
-Use Verilator by default. Keep tests and logs in the module test directory. Record the exact command and random seed.
+Use Verilator by default. Put tests only at approved test paths and put raw logs at the Task Envelope's evidence location. Record the exact command and random seed.
 
 Cover applicable cases:
 
@@ -79,7 +79,7 @@ Record:
 修复建议：
 ```
 
-## Static-review subagent
+## Static review
 
 Provide design paths, source paths, tests, and acceptance criteria. Ask it to return findings ordered by severity with file and line references. Require checks for:
 
@@ -89,17 +89,10 @@ Provide design paths, source paths, tests, and acceptance criteria. Ask it to re
 - event overlap, missing assertions, late responses, and index reuse;
 - weak tests whose observed result cannot distinguish the intended behavior.
 
-## Verification subagent
+## Verification review
 
 Provide source and test paths plus commands, without the primary agent's expected verdict. Require an independent run and a short report containing backend, seed, cycle count, pass/fail, log path, and uncovered behavior.
 
-## Report naming
+## Evidence ownership
 
-Follow repository convention, typically:
-
-```text
-test/<Module>/<Module>StaticReview.subagent.md
-test/<Module>/<Module>Verification.subagent.md
-```
-
-After fixes, rerun every affected directed test and the relevant stress test. Preserve failure logs when they explain a resolved bug; ignore generated logs in Git when repository policy requires it.
+Follow the Task Envelope for evidence paths and output format. Do not create standalone review documents when the Harness projects both reviews into one module verification record. After fixes, rerun every affected directed test and the relevant stress test. Preserve failure logs when they explain a resolved bug; ignore generated logs in Git when repository policy requires it.

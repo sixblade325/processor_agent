@@ -51,7 +51,7 @@ async function findPackageRoot(start: string): Promise<string> {
   }
 }
 
-function validateProfile(value: unknown): ProjectProfile {
+export function validateProfile(value: unknown): ProjectProfile {
   const root = object(value, "profile");
   const profile: ProjectProfile = {
     schemaVersion: number(root.schemaVersion, "schemaVersion"),

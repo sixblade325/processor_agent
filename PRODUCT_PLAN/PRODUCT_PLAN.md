@@ -2,7 +2,7 @@
 
 状态：已确认的第一版实施基线
 
-更新时间：2026-08-29
+更新时间：2026-08-30
 
 ## 文档职责
 
@@ -56,7 +56,7 @@ Idea
 
 Agent 交接只传递文档路径、版本、哈希、允许路径、验收条件和待解决问题。Agent 的完整思维过程、聊天转录和重复正文不进入项目。
 
-用户在对话中修正正式事实后，Design Agent 需要同步对应文档。文档同步完成前，相关 Change 不能进入下一阶段。
+用户在对话中修正正式事实后，负责当前 Design 的 Shadow Align 需要通过 Harness 同步对应文档。文档同步完成前，相关 Change 不能进入下一阶段。
 
 用户项目的人类可读文档默认使用简体中文。模块名、信号名、字段名、文件名、命令、代码和机器 Schema key 保持英文。仓库根目录 [USER_GUIDE.md](../USER_GUIDE.md) 是第一版用户操作入口，CLI 和项目资产规则变化时必须同步更新。
 
@@ -70,7 +70,7 @@ Stage3 -> Architecture Change -> Stage2 -> A/B Evaluation -> Stage3
 ```
 
 1. Stage1 一次性建立 ISA、Architecture、模块图、全局协议和项目结构。
-2. Stage2 反复完成模块 Design、Implementation、Unit Verification 和 Integration。
+2. Stage2 按模块反复完成 Design、Implementation 和 Verification，并在 Design 批准时由用户为当前模块选择验证执行模式。
 3. Stage3 反复完成测量、诊断、优化假设、Change 创建和 A/B 评估。
 4. Architecture Change 通过影响分析选定模块，并复用 Stage2 完成实现。
 5. Verification 是 Stage2 与 Stage3 的共同门禁。
@@ -206,7 +206,7 @@ Change Engine 管理状态转换、审批哈希、版本漂移和重开流程。
 
 ### 4.4 Agent Runtime Adapter
 
-Agent Runtime Adapter 隔离具体 Coding Agent。第一版实现 `CodexCliRuntime`。Decision 级 Research Task 和独立审查通过非交互 `codex exec` 执行，并保留以下稳定操作：
+Agent Runtime Adapter 隔离具体 Coding Agent。第一版实现 `CodexCliRuntime`。Decision 级 Research Task、独立审查和独立验证通过非交互 `codex exec` 执行，并保留以下稳定操作：
 
 ```text
 prepare
@@ -216,11 +216,16 @@ cancel
 capabilities
 ```
 
-每次 Agent 运行使用独立上下文，并接收结构化任务包。Research Task 依次启动只读 Research Worker 和只读 Synthesis Worker，前者输出来源与事实 Evidence，后者只基于 Evidence 比较候选项。
+Runtime 支持两种会话：
+
+1. Research Worker、Synthesis Worker、Static Review Worker 和 Verification Worker 使用新的短生命周期上下文，并接收结构化任务包。
+2. Stage2 的两个模块 Agent 使用可恢复 Windows Codex 上下文，通过 `resume` 在 Shadow Align 与 Active Coding 之间轮转。Harness 持久化线程标识、角色、模块、租约和 state epoch，Chisel 命令由 WSL Runner 执行。
+
+Research Task 依次启动只读 Research Worker 和只读 Synthesis Worker，前者输出来源与事实 Evidence，后者只基于 Evidence 比较候选项。
 
 新 Agent 必须能够仅依靠任务包和项目文件继续工作。Harness 不转发上一 Agent 的私有对话历史。
 
-第一版默认使用 ephemeral 会话、JSONL 事件和结构化输出 Schema。产品状态不依赖 Codex 会话恢复。
+短生命周期 Worker 使用 ephemeral 会话、JSONL 事件和结构化输出 Schema。Stage2 模块 Agent 可以恢复会话，产品正确性不依赖其私有历史。上下文丢失时，新 Agent 必须能从项目文件重建同一角色和任务。
 
 面向用户的 Workspace Agent 由 `processor-agent open <path>` 启动交互式 Codex。Harness 注入固定交互协议，要求 Agent 每轮查询磁盘状态并调用结构化 Harness 命令。交互会话只负责理解自然语言和展示结果，不拥有流程状态。
 
@@ -258,7 +263,7 @@ Skill 是阶段能力包。Workflow 决定 Skill 的调用顺序，Harness 强�
 -> 直接相关源码和测试
 ```
 
-Harness 启动时扫描 `skills/*/SKILL.md`，记录：
+Harness 组装任务时扫描对应的 `skills/*/SKILL.md` 与引用 Markdown，记录：
 
 ```text
 skill_id
@@ -273,7 +278,7 @@ gates
 
 `skill_id` 与 `content_hash` 来自 Skill 本身。适用阶段、输入输出、工具能力、写入范围和门禁由产品侧 Workflow Profile 声明，第一版不要求逐个改造现有 Skill 目录。
 
-用户项目只记录 Skill 名称和内容哈希，不复制 Skill 正文。
+用户项目只在 `.assistant/project.yaml` 的 Design、Implementation 和 Verification 记录中保存 Skill 名称与内容哈希，不复制 Skill 正文。第一版不另建 `skill-lock.yaml`。
 
 ### 5.1 第一版 Skill Profile
 
@@ -284,56 +289,62 @@ gates
 | Baseline Implementation | `design-chisel-processor`、`implement-chisel-processor` | 根据已确认设计实现源码和测试 |
 | Change Design | `design-chisel-processor` | 追踪源码并闭合 Contract 与 Design |
 | Change Implementation | `design-chisel-processor`、`implement-chisel-processor` | 在冻结设计与允许路径内实现 |
-| Verification | `implement-chisel-processor` 中的验证规则 | 第一版由 Harness 运行确定性测试 |
+| Verification | `implement-chisel-processor` 中的验证规则 | Active 完成主验证，用户按模块选择两个独立 Worker 或 Active 自行完成后续审查与验证 |
 | Timing Trace | `trace-vivado-timing-to-rtl` | 注册，第一版关闭 |
 | Timing Optimization | `optimize-chisel-fpga-timing` | 注册，第一版关闭 |
 
-### 5.2 编排 Skill 的产品化
+### 5.2 编排职责的产品化
 
-`orchestrate-chisel-development` 中的内容分为两类：
+双 Agent 编排不作为独立 Skill 保留。原 `orchestrate-chisel-development` 的职责按所有权拆入产品：
 
-1. 状态机、租约、审批哈希、路径权限和 Stage Gate 进入 Harness 与 Schema。
-2. 设计交接、重开条件和上下文检查保留为 Agent 方法指导。
+1. 模块状态、角色分配、租约、state epoch、审批哈希、路径权限、证据失效、重开和原子轮转由 Harness 与 Schema 强制执行。
+2. Authority、当前角色、批准文档、允许路径、Stage Gate、证据字段和下一步动作由 Harness 写入每次 Agent Task Envelope。
+3. Design、批准哈希、实现范围、验收条件和 Verification Record 构成持久交接面，不创建独立 handoff 文件。
+4. `design-chisel-processor` 与 `implement-chisel-processor` 只保留领域方法，不承担线程身份、租约或状态转换。
 
-第一版统一使用 `.assistant/`，不使用遗产中的 `.codex/chisel-workflow/`。逐源码 `_codex.md` 规则不进入第一版项目，变更级实施记录由 Change 和 Design 承担。
+第一版统一使用 `.assistant/`，不使用遗产中的 `.codex/chisel-workflow/`。逐源码 `_codex.md` 规则不进入第一版项目，变更级实施记录由 Change、Design 和 Verification Record 承担。
 
 ## 6. Agent 模型
 
-用户始终面对一个 Workspace Agent。Design Agent 和 Implementation Agent 是跨阶段的两个主要职责。Stage1 Research Task 额外使用两个短生命周期 Worker，不形成新的持久角色。
+用户始终面对一个 Workspace Agent。Stage2 维护两个可恢复的 Windows Codex 上下文，在 Shadow Align 与 Active Coding 之间按模块轮转。Stage1 Research Task 和 Stage2 可选验证使用短生命周期 Worker，不形成新的持久角色。
 
-### 6.1 Design Agent
+### 6.1 Workspace Agent
 
-权限：
+1. 作为唯一用户交互入口。
+2. 展示当前状态、Design 批准包和待确认问题。
+3. 在每个模块批准 Design 时，明确询问是否启动两个独立验证 Worker。
+4. 不代替用户批准 Design 或选择验证模式。
+5. 通过 Harness 查询和提交正式状态，不直接改写 `.assistant/`。
 
-1. 读取 Architecture、Design、源码和测试。
-2. 写入 Architecture 草案、Design 和 `.assistant/` 中的追踪状态。
-3. 提交需要用户回答的设计问题。
-4. 无源码写权限。
+### 6.2 Shadow Align
 
-职责：
-
-1. 建立 Project Model。
+1. 读取 Architecture、Design、相关源码和测试。
 2. 追踪 producer、寄存边界、consumer 和副作用。
-3. 闭合字段、事件、周期、优先级、flush、stall 和异常路径。
-4. 生成 Architecture Contract、Design 和 Acceptance Tests。
+3. 与用户闭合字段、事件、周期、优先级、异常路径和验收条件。
+4. 向 Harness 提交 Design 提案，无 RTL 和测试写权限。
 
-### 6.2 Implementation Agent
+### 6.3 Active Coding
 
-权限：
+1. 只在当前模块通过 `DESIGN_CLOSED` 后获得实现租约。
+2. 读取已批准 Contract、Design 和允许路径，批准后的 Design 保持只读。
+3. 只修改任务声明的源码和测试路径，完成最小实现、断言与主验证。
+4. 用户选择 `active_only` 时，执行分离的静态自审和完整验证。
+5. 发现设计缺口时提交带反例的 `DESIGN_REOPENED` 请求。
 
-1. 使用新的上下文。
-2. 读取已确认 Contract、Design 和允许的源码范围。
-3. 修改任务声明的源码、Design 和测试路径。
-4. 无 Architecture 审批权。
+### 6.4 验证 Worker
 
-职责：
+每个模块的 Design 批准包必须记录用户选择：
 
-1. 完成最小实现改动。
-2. 同步 Design、断言和测试。
-3. 运行允许的验证命令。
-4. 发现设计缺口时提交 `DESIGN_REOPENED` 请求。
+1. `independent_workers` 创建独立 Static Review Worker 和独立 Verification Worker。两个 Worker 均无正式文件写权限，可以并行执行。
+2. `active_only` 不创建 Worker，由 Active Coding 完成静态自审和验证，证据不得声明独立性。
+3. Harness 不继承上一模块的选择，也不推断默认值。
 
-第一版不执行并行正式写入。同一时刻只有一个 Agent 持有写租约。
+### 6.5 租约与轮转
+
+1. Shadow Align 可以闭合下一模块 Design，Active Coding 可以实现当前模块，两者只允许写入互不相交的路径。
+2. 任一路径同一时刻只有一个写入者，Harness 是状态、审批和正式证据投影的唯一写入者。
+3. 当前 Active 模块 `COMPLETE` 且 Shadow 模块 `DESIGN_CLOSED` 后，Harness 原子交换两个角色与租约并递增 state epoch。
+4. Static Review Worker 和 Verification Worker 不参与轮转，任务结束后释放。
 
 ## 7. 生命周期总览
 
@@ -369,11 +380,11 @@ user_project/
 其余实体按首次正式内容延迟创建：
 
 1. 首次调研创建 `research/`。
-2. 首次模块设计创建 `architecture/modules/` 和 `design/`。
+2. 首次模块设计创建 `design/`，Stage1 已批准的 `architecture/modules.yaml` 在 Stage2 保持只读。
 3. 首次架构变更创建 `architecture/contracts/` 与 `architecture/decisions/`。
-4. 首次实现和测试分别创建 `src/` 与 `verification/`。
+4. 首次实现创建 `src/`，首次形成正式验证证据时创建 `verification/`。
 5. 首次优化创建 `experiments/`，其下分类目录也按内容创建。
-6. `project-model.json`、`skill-lock.yaml` 和 `.assistant/changes/` 在对应状态首次产生时创建。
+6. `project-model.json` 和 `.assistant/changes/` 在对应状态首次产生时创建。
 
 不生成空目录。Research、Architecture、Design、源码、验证与确认后的实验结论是项目正式资产。`.assistant/` 保存状态与引用。调研原始下载和临时检索结果进入工作区级 `.runtime/`。
 
@@ -425,6 +436,8 @@ processor-agent stage1 advise <path>
 processor-agent stage1 answer <path> <decision-id> <option-id>
 processor-agent stage1 custom <path> <decision-id>
 processor-agent stage1 defer <path> <decision-id>
+processor-agent stage1 reopen <path> <decision-id> --reason <reason>
+processor-agent stage1 correct <path> <finding-code> [finding-code...] --patch-json <json> --reason <reason> --source <locator>
 processor-agent stage1 probe <path>
 processor-agent stage1 profile-refresh <path>
 processor-agent stage1 review <path>
@@ -485,7 +498,7 @@ Product 与 Direct Codex 从同一个冻结 commit 开始。Product 使用完整
 4. Module Manifest 与 Stage2 模块开发循环。
 5. Skill Registry 与固定 Architecture Change Profile。
 6. `CodexCliRuntime` Agent Runtime Adapter。
-7. Design Agent 与 Implementation Agent。
+7. Workspace Agent、可轮转的 Shadow Align 与 Active Coding，以及按模块可选的两个验证 Worker。
 8. 三级信息处理与架构决策审批。
 9. 路径权限、Diff 检查和确定性验证门禁。
 10. CLI 与最小本地 Web 工作台。
@@ -498,7 +511,7 @@ Product 与 Direct Codex 从同一个冻结 commit 开始。Product 使用完整
 1. 完整论文与参考核 Research 流程。
 2. Vivado 时序闭合与自动 PPA 优化。
 3. 自动设计空间搜索。
-4. 多 Agent 并行正式写入。
+4. 多模块并行实现和同一路径的多 Agent 写入。
 5. 多种 RTL 语言和多种构建系统。
 6. 远程云执行、团队权限和账号系统。
 7. Skill 市场与第三方插件生态。
@@ -534,17 +547,19 @@ Product 与 Direct Codex 从同一个冻结 commit 开始。Product 使用完整
 
 1. 实现 Skill Registry 和内容锁定。
 2. 实现第一个 Agent Runtime Adapter。
-3. 实现 Design 与 Implementation Task Envelope。
+3. 实现 Shadow Align、Active Coding 与验证 Worker Task Envelope。
+4. 实现两个可恢复 Windows Codex 上下文的角色轮转与租约检查，并使用 WSL Runner 执行 Chisel 命令。
 
-完成标准：两个独立上下文按权限生成设计和补丁，Harness 可以拒绝越权结果。
+完成标准：两个可恢复上下文能够按权限轮转，Harness 可以拒绝越权结果，短生命周期 Worker 不获得正式文件写权限。
 
 ### M4：Guided Baseline
 
 1. 实现 `dual_issue_demo` Profile。
 2. 引导用户闭合最小 Architecture 与 Design。
 3. 建立 Research Memo、Module Manifest 和模块实施顺序。
-4. 通过 Stage2 生成 baseline Core、测试和性能计数器。
-5. 验证并冻结 baseline commit。
+4. 以 `regfile` 完成第一条 `Design -> Implementation -> Verification` tracer。
+5. 通过 Stage2 生成 baseline Core、测试和性能计数器。
+6. 验证并冻结 baseline commit。
 
 完成标准：从空目录生成可运行 baseline，重启 Harness 后可以恢复。
 
@@ -573,8 +588,8 @@ Product 与 Direct Codex 从同一个冻结 commit 开始。Product 使用完整
 1. `processor_agent` 可以从空目录生成 `dual_issue_demo`。
 2. 生成过程由 Project Blueprint 驱动，框架核心没有 Demo 专属硬编码。
 3. 用户可以暂停、关闭并恢复当前项目和 Change。
-4. Design Agent 无法通过正常工具写入源码。
-5. Implementation Agent 的 Diff 受到允许路径约束。
+4. Shadow Align 无法通过正常工具写入源码和测试。
+5. Active Coding 的 Diff 受到允许路径约束，批准后的 Design 保持只读。
 6. 用户审批绑定具体 Contract 与 Design 哈希。
 7. 设计文件变化会自动触发重新对齐。
 8. 设计缺口可以从 Implementation 返回 Design。
@@ -588,6 +603,8 @@ Product 与 Direct Codex 从同一个冻结 commit 开始。Product 使用完整
 16. 每个模块都能通过 Module ID 追踪到 Architecture、Design、源码和验证。
 17. Stage3 结果包含 baseline、优化假设、对应 Change、A/B 证据和接受结论。
 18. 未安装 ChatGPT 客户端时，产品仍能完成第一版完整流程。
+19. 每个模块都保存用户明确选择的 `verificationMode`，且不继承上一模块选择。
+20. `independent_workers` 必须留下两个独立 Worker 的执行证据，`active_only` 不得被表述为独立验证。
 
 ## 15. 技术基线与剩余待定事项
 

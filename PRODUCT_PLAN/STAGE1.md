@@ -30,13 +30,15 @@ Stage1 负责全局 Architecture、共享边界、项目级验证策略、实施
 
 ## 1.1 当前实现快照
 
-截至 2026-08-30，Stage1 已实现 Profile 驱动的初始化、环境探测、决策依赖图、Decision 级 Research Task、指纹缓存与显式刷新、正式文档同步、独立架构审查、批准哈希、项目骨架生成、WSL smoke check、未批准 Profile 更新和 Workspace Agent 自然语言入口。
+截至 2026-08-30，Stage1 已实现 Profile 驱动的初始化、环境探测、决策依赖图、Decision 级 Research Task、指纹缓存与显式刷新、未批准 Decision 修正、正式文档同步、独立架构审查、Review Correction、批准哈希、项目骨架生成、WSL smoke check、未批准 Profile 更新和 Workspace Agent 自然语言入口。
 
-`dual_issue_demo` Profile `0.7.0` 已为八个 Decision 声明 `researchPolicy`。隔离端到端运行通过独立架构审查且无 finding，并在 WSL 中通过 SBT 编译。实际 `E:\107\dual_issue_demo` 已迁移到 `0.7.0`，当前动作为 `S1_DEC_007` 的 required Research Task。
+`dual_issue_demo` Profile `0.7.0` 已为八个 Decision 声明 `researchPolicy`。隔离端到端运行通过独立架构审查且无 finding，并在 WSL 中通过 SBT 编译。实际 `E:\107\dual_issue_demo` 已迁移到 `0.7.0`，并已覆盖完整决策、Architecture audit、Decision reopen、重新调研和修订结论提交。
 
-当前恢复能力覆盖正常关闭后从 `.assistant/project.yaml` 和 Profile 快照继续执行。命令中断期间的多文件事务恢复、批准后的显式 reopen、自由形式 discovery 与 synthesis、本地 Web 界面进入后续实现。
+当前恢复能力覆盖正常关闭后从 `.assistant/project.yaml` 和 Profile 快照继续执行，也支持修正尚未批准的已关闭 Decision。重开后的 Decision 以此前结论为修订基线，旧 advice 自动失效，Research 与 Synthesis 必须围绕修正原因形成完整修订候选。命令中断期间的多文件事务恢复、批准后的 Architecture reopen、自由形式 discovery 与 synthesis、本地 Web 界面进入后续实现。
 
-Research Task 接收用户指定的问题、仓库、URL 和范围。Research Worker 负责来源与事实，Synthesis Worker 只读取结构化 Evidence。Harness 记录请求指纹、缓存命中、run ID、两个 Worker thread ID、证据充分性和停止原因。`advise` 作为默认请求的兼容入口保留。
+Architecture audit finding 已显式分类为 `decision`、`project_spec` 和 `profile`。`project_spec` finding 通过 `stage1 correct` 修改 `.assistant/project.yaml` 中的结构化项目事实并重新生成现有正式文档。旧 audit 进入审查历史，修正必须经过新的 `review` 和当前文档哈希对应的独立 `audit` 才能批准。
+
+Research Task 接收用户指定的问题、仓库、URL 和范围。Research Worker 负责来源与事实，Synthesis Worker 只读取结构化 Evidence。Harness 记录请求指纹、缓存命中、run ID、两个 Worker thread ID、证据充分性和停止原因。隔离 Worker 固定使用 Codex `read-only` sandbox，并通过 Harness 提供的 `processor_project` MCP 读取项目证据。该 MCP 只暴露文件枚举、文本搜索和分段读取，不提供写入工具，也不依赖交互会话的 execpolicy allowlist。`advise` 作为默认请求的兼容入口保留。
 
 用户项目中的人类可读 Stage1 产物默认使用中文。模块名、信号名、字段名、路径、命令、代码和机器状态 key 保持英文。新项目没有 `AGENTS.md` 时生成严格版协作约束，已有文件不自动覆盖。
 
@@ -198,6 +200,53 @@ Decision Packet 必须给出实际后果和受影响文档。只列选项、不�
 
 批准后修改受保护内容时，状态进入 `NEEDS_REVISION`。旧批准不能继续用于生成项目骨架或启动 Stage2。
 
+### 6.5 Review Correction
+
+Architecture audit finding 按修正所有者分为三类：
+
+| `repairKind` | 适用范围 | 修正入口 |
+|---|---|---|
+| `decision` | 已有用户决策的结论、约束或适用范围错误 | `stage1 reopen` |
+| `project_spec` | 用户项目的 Module Manifest、共享字段、全局协议、Verification Contract 或验收数据缺失 | Review Correction |
+| `profile` | 对所有使用该 Profile 的项目都成立的通用模板错误 | 修改框架 Profile 后执行 `profile-refresh` |
+
+`project_spec` 修正使用一个新的逻辑实体 `Review Correction`，保存在现有 `.assistant/project.yaml`。第一版不新增用户目录和正式文档。Harness 根据修正结果重新生成现有 `architecture/overview.md`、`architecture/modules.yaml` 和 `verification/plan.md`。
+
+每个 finding 至少记录：
+
+```yaml
+code: PIPELINE_MANIFEST_INCOMPLETE
+repairKind: project_spec
+repairTarget: architecture.modules
+relatedDecision: S1_DEC_003
+requiredClosure:
+  - Instruction Queue state owner
+  - hold、kill、release 和 reuse 规则
+status: open
+```
+
+Review Correction 必须满足以下规则：
+
+1. Audit Agent 只分类和描述缺口，不直接修改项目。
+2. Workspace Agent 每轮只处理一个 open finding 或一个由相同根因合并的 finding 组。
+3. `project_spec` 修正写入结构化项目事实，禁止对生成文档进行任意文本补丁。
+4. 修正必须记录 finding code、目标字段、旧值、新值、理由、来源和用户确认。
+5. 项目专属修正不得写回通用 Profile。确认对所有同 Profile 项目均成立的缺陷才使用 `profile`。
+6. Harness 重新生成正式文档后，原 audit 报告保留为历史证据，finding 标记为 `superseded`，不能直接标记为通过。
+7. 必须重新执行确定性 `review` 和独立 `audit`。只有新文档哈希对应的 audit 返回 pass 才能批准。
+
+审查修正闭环为：
+
+```text
+audit
+-> finding 分类
+-> reopen Decision | Review Correction | Profile 修正
+-> 重新生成正式文档
+-> review
+-> audit
+-> approve
+```
+
 ## 7. 用户交互
 
 Stage1 按以下主题推进：
@@ -219,11 +268,15 @@ Stage1 按以下主题推进：
 4. 用户回答后立即更新正式草案和机器状态。
 5. 下一轮只读取项目文件、当前状态和本轮任务包。
 6. 聊天中的修正尚未同步到文档时，流程停留在当前状态。
-7. 最终审阅展示已确认事项、deferred 项、生成预览和 Stage2 实施顺序。
+7. 修正已关闭 Decision 时必须记录原因并执行 `stage1 reopen`。Harness 保留旧结论，把目标重置为 pending，并使目标旧 advice 与全部传递依赖 Decision 失效。
+8. 修正后重新读取 `status` 和 `next`。`next` 必须携带此前结论、修正原因和完整修订候选，Profile 默认推荐不得覆盖此前讨论结果。
+9. `revise_previous` 只能通过 `custom` 提交 `proposedCustomAnswer`，并继续受显式用户确认门禁约束。
+10. Audit finding 按 6.5 节进入对应修正入口。`relatedDecision` 不能替代 `repairKind`，没有 Decision owner 的项目事实不得强行通过 `reopen` 修正。
+11. 最终审阅展示已确认事项、deferred 项、open finding、生成预览和 Stage2 实施顺序。
 
 用户始终面对一个 Workspace Agent。Harness 拥有交互状态、问题队列、审批和恢复逻辑。Codex CLI 通过结构化任务生成调研、方案和文档更新。
 
-第一版入口为 `processor-agent open <path>`。该命令校验 Stage1 项目和 Codex CLI，随后在项目根目录启动交互式 Codex，并注入固定 Workspace Agent 协议。协议要求 Agent 每轮重新查询 `status` 和 `next`，自动执行 required Research Task，将用户指定来源写入 Research Request，只展示一个 ready Decision，并保留 delegated decision 和 Architecture Approval 的显式用户门禁。Harness 命令仍是状态与正式草案的唯一写入口。
+第一版入口为 `processor-agent open <path>`。该命令校验 Stage1 项目和 Codex CLI，随后在项目根目录启动交互式 Codex，并注入固定 Workspace Agent 协议。协议要求 Agent 每轮重新查询 `status` 和 `next`，自动执行 required Research Task，将用户指定来源写入 Research Request，只展示一个 ready Decision，并保留推荐选项、自定义架构结论和 Architecture Approval 的显式用户门禁。Harness 命令仍是状态与正式草案的唯一写入口。
 
 ## 8. Agent 配置
 
@@ -248,6 +301,8 @@ NEW
 -> DECISION_LOOP
    <-> RESEARCHING
 -> ARCHITECTURE_REVIEW
+   -> REVIEW_CORRECTION
+   -> ARCHITECTURE_REVIEW
 -> ARCHITECTURE_APPROVED
 -> PROJECT_SCAFFOLDED
 -> STAGE1_COMPLETE
@@ -267,9 +322,11 @@ CANCELLED
 2. `BLUEPRINT_DRAFTED` 允许未知项存在，每个未知项必须具有类型和影响范围。
 3. `DECISION_LOOP` 只推进当前依赖已经满足的决策。
 4. `ARCHITECTURE_REVIEW` 要求所有 blocking 决策已经闭合。
-5. `ARCHITECTURE_APPROVED` 绑定正式文档哈希。
-6. `PROJECT_SCAFFOLDED` 只能使用已批准的 Architecture Snapshot。
-7. 任一阶段可因外部条件进入 `BLOCKED`，并记录阻塞原因和恢复条件。
+5. Audit fail 时，`decision` finding 回到 `DECISION_LOOP`，`project_spec` finding 进入 `REVIEW_CORRECTION`，`profile` finding 等待 Profile 修正和迁移。
+6. `REVIEW_CORRECTION` 只允许通过 Harness 修改 6.5 节定义的结构化项目事实，完成后回到 `ARCHITECTURE_REVIEW`。
+7. `ARCHITECTURE_APPROVED` 绑定正式文档哈希，且当前哈希对应的 audit 必须为 pass。
+8. `PROJECT_SCAFFOLDED` 只能使用已批准的 Architecture Snapshot。
+9. 任一阶段可因外部条件进入 `BLOCKED`，并记录阻塞原因和恢复条件。
 
 ## 10. 持久产物
 
@@ -277,7 +334,7 @@ Stage1 使用逻辑产物定义职责，实际文件按首次内容创建，不�
 
 | 产物 | 默认位置 | 内容 |
 |---|---|---|
-| Project State | `.assistant/project.yaml` | Profile、状态、revision、决策索引、哈希和命令 |
+| Project State | `.assistant/project.yaml` | Profile、状态、revision、决策索引、Review Correction、哈希和命令 |
 | Architecture Overview | `architecture/overview.md` | 目标、ISA、系统边界、流水线、全局规则和不变量 |
 | Module Manifest | `architecture/modules.yaml` | Module ID、职责、依赖、接口和 Stage2 顺序 |
 | Decision Record | `architecture/overview.md` 或独立 ADR | 已批准选择、理由、影响和来源引用 |
@@ -304,6 +361,7 @@ Stage1 使用逻辑产物定义职责，实际文件按首次内容创建，不�
 11. 用户批准绑定当前文档 revision 和聚合哈希。
 12. 项目骨架、Git 和机器状态可以从磁盘恢复。
 13. 新的 Agent 只读取项目文件即可说明当前架构和下一步模块。
+14. 当前文档哈希对应的独立 audit 已通过，且不存在 open Review Correction。
 
 ## 12. 第一版 `dual_issue_demo` Profile
 
@@ -333,6 +391,7 @@ baseline 禁止 `lane0 -> lane1` 同拍 RAW 配对属于需要用户批准的架
 7. 实现聚合哈希、批准失效和最终只读审查。
 8. 实现经批准的 Project Scaffold 生成。
 9. 使用 `dual_issue_demo` Profile 完成从空目录到 `STAGE1_COMPLETE` 的端到端测试。
+10. 实现 audit finding 分类、Review Correction、结构化项目事实更新和重新审查闭环。
 
 ## 14. Stage1 产品验收
 
@@ -344,6 +403,8 @@ baseline 禁止 `lane0 -> lane1` 同拍 RAW 配对属于需要用户批准的架
 6. Agent 推荐能够追溯到项目事实或调研来源。
 7. Stage1 不生成未经批准的 baseline RTL。
 8. 新 Agent 可以根据产物生成正确的 Stage2 首模块任务包。
+9. Audit 发现 Decision 之外的项目事实缺口时，可以在不手工编辑生成文档、不修改通用 Profile 的情况下完成项目级修正。
+10. 每项 Review Correction 可以追溯到 finding、用户确认、结构化字段变化和重新审查结果。
 
 ## 15. 实现结果
 
@@ -356,12 +417,16 @@ baseline 禁止 `lane0 -> lane1` 同拍 RAW 配对属于需要用户批准的架
 5. 未批准 Profile 可以迁移，已经回答或已有建议的 Decision 定义不能静默变化。
 6. Windows 路径可以转换为 WSL 路径。
 7. 生产 Profile 可以通过结构校验。
-8. `processor-agent open` 可以启动 Workspace Agent，自动查询 Harness，并把自然语言“按推荐”提交为当前 Decision 的推荐 option。
-9. Decision 回答、自定义和延期后仍保留对应调研证据；旧版本产生的孤立建议可以在不调用 Codex 的情况下自动重新挂接。
+8. `processor-agent open` 可以启动 Workspace Agent，自动查询 Harness，并把自然语言“按推荐”映射为当前 Profile option 或完整修订结论。
+9. Decision 正常回答、自定义和延期后保留对应调研证据；Decision 重开时旧 advice 失效。没有活动修正记录的旧版本孤立建议可以自动重新挂接。
 10. `stage1 advise` 默认复用有效建议，并支持 `--refresh` 显式重新调研。
 11. `stage1 research` 接收 `question`、重复的 `source` 和 `scope`，相同指纹命中缓存。
 12. required Decision 在证据充分前不能回答；`next` 自动返回 Research Task。
 13. Research 与 Synthesis 使用独立只读 Codex Worker，运行记录进入工作区级 `.runtime/`。
-14. 自动测试覆盖 20 项，包括三种 research policy、required 门禁、证据不足、双 Worker、指纹缓存、完整 Research Memo 和 legacy advice 迁移。
+14. 未批准的已关闭 Decision 可以通过 `stage1 reopen` 修正。旧结论和修正原因进入审计记录，目标旧 advice 与全部传递依赖 Decision 自动失效，修订建议必须保留未被新证据否定的既有内容。
+15. Audit finding 显式声明修正所有者和结构化目标。`project_spec` 修正记录 finding、字段旧值和新值、理由、来源、用户确认与重新审查结果，且不能写回通用 Profile。
+16. 自动测试覆盖 28 项，包括三种 research policy、required 门禁、证据不足、双 Worker、Worker 隔离参数、只读 Project Reader MCP、指纹缓存、完整 Research Memo、legacy advice 迁移、Decision 重开、修订基线、传递失效、Review Correction 和修正所有权门禁。
 
 隔离端到端验证覆盖 `init -> decisions -> review -> audit -> approve -> scaffold -> complete`，最终状态为 `STAGE1_COMPLETE`。Workspace Agent 端到端验证覆盖 `open -> status -> next -> 自然语言回答 -> answer -> next`。Stage2 首模块任务包生成等待 Stage2 开发。
+
+尚未实现的已确认 Stage1 缺口：批准后的 Architecture reopen、命令中断期间的多文件事务恢复、自由形式 discovery 与 synthesis、本地 Web 界面。

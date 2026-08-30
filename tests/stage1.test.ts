@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -7,14 +8,23 @@ import { parse, stringify } from "yaml";
 import {
   adviseDecision,
   buildWorkspaceAgentPrompt,
+  isolatedCodexWorkerArguments,
   researchDecision,
   type StructuredWorkerExecutor,
 } from "../src/agent-runtime.js";
 import { toWslPath } from "../src/io.js";
 import { loadProfile } from "../src/profile.js";
+import { renderDecisionPacket } from "../src/render.js";
+import {
+  PROJECT_READER_TOOLS,
+  listProjectFiles,
+  readProjectFile,
+  searchProjectText,
+} from "../src/project-reader-mcp.js";
 import {
   answerCustomDecision,
   answerDecision,
+  applyReviewCorrection,
   approveStage1,
   completeStage1,
   currentGeneratedAggregate,
@@ -25,6 +35,7 @@ import {
   loadStage1,
   probeEnvironment,
   refreshStage1Profile,
+  reopenDecision,
   reviewStage1,
   saveDecisionAdvice,
   saveArchitectureReview,
@@ -37,6 +48,46 @@ import type {
   ResearchEvidence,
   Stage1ProjectState,
 } from "../src/types.js";
+
+test("Isolated Codex Workers ignore interactive execpolicy and retain the read-only sandbox", () => {
+  const args = isolatedCodexWorkerArguments();
+  assert.deepEqual(args, [
+    "exec",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--ephemeral",
+    "--json",
+    "--skip-git-repo-check",
+    "--sandbox",
+    "read-only",
+  ]);
+  assert.equal(args.includes("--dangerously-bypass-approvals-and-sandbox"), false);
+  const researchArgs = isolatedCodexWorkerArguments("C:\\project");
+  assert.match(researchArgs.join(" "), /mcp_servers\.processor_project\.command/u);
+  assert.match(researchArgs.join(" "), /project-reader-mcp\.js/u);
+});
+
+test("Project Reader MCP exposes bounded read-only project evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "processor-agent-reader-"));
+  await mkdir(join(root, "src"), { recursive: true });
+  await mkdir(join(root, "target"), { recursive: true });
+  await writeFile(join(root, "src", "Core.scala"), "class Core\nval redirect = true\n", "utf8");
+  await writeFile(join(root, "target", "Generated.scala"), "val redirect = false\n", "utf8");
+
+  assert.equal(await listProjectFiles(root), "src/Core.scala");
+  assert.equal(await readProjectFile(root, "src/Core.scala", 2, 2), "2: val redirect = true");
+  assert.equal(
+    await searchProjectText(root, "redirect"),
+    "src/Core.scala:2:val redirect = true",
+  );
+  assert.equal(PROJECT_READER_TOOLS.every((tool) => tool.annotations.readOnlyHint), true);
+  assert.equal(PROJECT_READER_TOOLS.some((tool) => tool.annotations.destructiveHint), false);
+  await assert.rejects(readProjectFile(root, "../outside"), /Unsafe relative path/u);
+  await assert.rejects(
+    readProjectFile(root, "target/Generated.scala"),
+    /excluded from research/u,
+  );
+});
 
 test("Stage1 completes a deterministic profile-driven workflow", async () => {
   const fixture = await createFixture();
@@ -79,6 +130,145 @@ test("Stage1 completes a deterministic profile-driven workflow", async () => {
   assert.match(overview, /结论：Option A/u);
   const verification = await readFile(join(fixture.project, "verification", "plan.md"), "utf8");
   assert.match(verification, /决策对应要求/u);
+});
+
+test("Review Correction updates structured project facts and requires a fresh audit", async () => {
+  const fixture = await createFixture();
+  await initStage1(fixture.project, fixture.profile);
+  await answerDecision(fixture.project, "D1", "a");
+  await answerDecision(fixture.project, "D2", "b");
+  await reviewStage1(fixture.project);
+  let loaded = await loadStage1(fixture.project);
+  await saveArchitectureReview(fixture.project, {
+    reviewedAggregateSha256: currentGeneratedAggregate(loaded.state),
+    verdict: "fail",
+    summary: "Module Manifest 缺少独立 queue 所有权。",
+    findings: [
+      {
+        severity: "error",
+        code: "MODULE_QUEUE_MISSING",
+        message: "Module Manifest 未记录 queue 模块及状态所有权。",
+        artifact: "architecture/modules.yaml",
+        relatedDecision: "D2",
+        repairKind: "project_spec",
+        repairTarget: "architecture.modules",
+        requiredClosure: ["queue 责任和状态所有权", "Stage2 实施顺序"],
+        status: "open",
+      },
+    ],
+  });
+
+  loaded = await loadStage1(fixture.project);
+  assert.equal(loaded.state.stage1.status, "REVIEW_CORRECTION");
+  const action = getNextStage1Action(loaded.state, loaded.loadedProfile.profile);
+  assert.equal(action?.kind, "review_finding");
+  await assert.rejects(reviewStage1(fixture.project), /open audit finding MODULE_QUEUE_MISSING/u);
+
+  const patch = {
+    architecture: {
+      modules: [
+        {
+          id: "core",
+          responsibility: "Test core.",
+          stateOwnership: [],
+          dependsOn: [],
+          interfaces: ["test"],
+        },
+        {
+          id: "queue",
+          responsibility: "Hold test instructions.",
+          stateOwnership: ["entries", "valid"],
+          dependsOn: ["core"],
+          interfaces: ["enqueue", "dequeue"],
+        },
+      ],
+      stage2Order: ["core", "queue"],
+    },
+  };
+  const correctionResult = spawnSync(
+    process.execPath,
+    [
+      resolve("dist", "src", "cli.js"),
+      "stage1",
+      "correct",
+      fixture.project,
+      "MODULE_QUEUE_MISSING",
+      "--patch-json",
+      JSON.stringify(patch),
+      "--reason",
+      "独立 queue 是当前项目已确认的流水边界。",
+      "--source",
+      "architecture/overview.md#架构决策",
+    ],
+    { encoding: "utf8" },
+  );
+  assert.equal(correctionResult.status, 0, correctionResult.stderr);
+  assert.match(correctionResult.stdout, /Applied Review Correction: S1_CORR_001/u);
+  loaded = await loadStage1(fixture.project);
+
+  assert.equal(loaded.state.stage1.status, "ARCHITECTURE_REVIEW");
+  assert.equal(loaded.state.stage1.review, undefined);
+  assert.equal(loaded.state.stage1.reviewCorrections?.[0]?.status, "applied");
+  assert.equal(loaded.state.stage1.reviewHistory?.[0]?.findings[0]?.status, "superseded");
+  assert.equal(loaded.loadedProfile.profile.architecture.modules.length, 1);
+  const manifest = parse(
+    await readFile(join(fixture.project, "architecture", "modules.yaml"), "utf8"),
+  ) as { modules: Array<{ id: string }>; stage2Order: string[] };
+  assert.deepEqual(manifest.modules.map((module) => module.id), ["core", "queue"]);
+  assert.deepEqual(manifest.stage2Order, ["core", "queue"]);
+
+  await assert.rejects(approveStage1(fixture.project), /audit has not been recorded/u);
+  await reviewStage1(fixture.project);
+  await savePassingReview(fixture.project);
+  loaded = await loadStage1(fixture.project);
+  assert.equal(loaded.state.stage1.reviewCorrections?.[0]?.status, "verified");
+  await approveStage1(fixture.project);
+});
+
+test("Review Correction enforces repair ownership and declared targets", async () => {
+  const fixture = await createFixture();
+  await initStage1(fixture.project, fixture.profile);
+  await answerDecision(fixture.project, "D1", "a");
+  await answerDecision(fixture.project, "D2", "b");
+  await reviewStage1(fixture.project);
+  let loaded = await loadStage1(fixture.project);
+  await saveArchitectureReview(fixture.project, {
+    reviewedAggregateSha256: currentGeneratedAggregate(loaded.state),
+    verdict: "fail",
+    summary: "D1 结论需要修正。",
+    findings: [
+      {
+        severity: "error",
+        code: "D1_SCOPE_WRONG",
+        message: "D1 的适用范围与系统边界冲突。",
+        artifact: "architecture/overview.md",
+        relatedDecision: "D1",
+        repairKind: "decision",
+        repairTarget: "D1",
+        requiredClosure: ["重新确认 D1 适用范围"],
+        status: "open",
+      },
+    ],
+  });
+  loaded = await loadStage1(fixture.project);
+  assert.equal(loaded.state.stage1.status, "DECISION_LOOP");
+  await assert.rejects(
+    applyReviewCorrection(fixture.project, {
+      findingCodes: ["D1_SCOPE_WRONG"],
+      patch: { architecture: { invariants: ["In order"] } },
+      rationale: "错误入口测试。",
+      sources: ["architecture/overview.md"],
+    }),
+    /must be repaired through decision/u,
+  );
+  const reopened = await reopenDecision(
+    fixture.project,
+    "D1",
+    "按 audit finding 修正 D1 适用范围。",
+  );
+  assert.equal(reopened.loaded.state.stage1.decisions.D1?.status, "pending");
+  assert.equal(reopened.loaded.state.stage1.review, undefined);
+  assert.equal(reopened.loaded.state.stage1.reviewHistory?.[0]?.findings[0]?.code, "D1_SCOPE_WRONG");
 });
 
 test("Stage1 enforces decision dependencies", async () => {
@@ -283,9 +473,12 @@ test("Dual-issue production profile generates Chinese documents and strict proje
   assert.match(overview, /构建一个正确、可检查的顺序双发射 baseline/u);
   assert.match(manifest, /documentLanguage: zh-CN/u);
   assert.match(agents, /默认使用中文撰写人类可读文档/u);
+  assert.match(agents, /每个源码和测试路径只允许一个 Module ID 拥有/u);
   assert.match(agents, /禁止自行补协议、字段、身份保护和保守机制/u);
   assert.match(agents, /processor-agent open <path>/u);
   assert.match(agents, /不得用直接编辑替代 Harness 命令/u);
+  assert.match(agents, /processor-agent stage1 reopen/u);
+  assert.doesNotMatch(agents, /delegated/u);
 });
 
 test("Workspace Agent prompt routes natural language through the Harness", async () => {
@@ -299,11 +492,15 @@ test("Workspace Agent prompt routes natural language through the Harness", async
   assert.match(prompt, /processor-agent stage1 next \. --json/u);
   assert.match(prompt, /processor-agent stage1 answer \. <decision-id> <option-id>/u);
   assert.match(prompt, /processor-agent stage1 research \. <decision-id>/u);
+  assert.match(prompt, /processor-agent stage1 reopen \. <decision-id> --reason/u);
+  assert.match(prompt, /processor-agent stage1 correct \. <finding-code>/u);
+  assert.match(prompt, /repairKind=decision/u);
   assert.match(prompt, /影响正式决策的来源调研不得由 Workspace Agent 在主上下文中直接完成/u);
   assert.match(prompt, /nextAction=decision_ready/u);
   assert.match(prompt, /不得手工修改 `\.assistant\/`/u);
   assert.match(prompt, /不得一次要求用户确认多个架构决策/u);
   assert.match(prompt, /不得.*再次调用 `processor-agent open`/u);
+  assert.doesNotMatch(prompt, /delegated|--delegated/u);
   assert.match(prompt, /Stage1=DECISION_LOOP/u);
   assert.match(prompt, /nextDecision=D1/u);
 
@@ -311,7 +508,23 @@ test("Workspace Agent prompt routes natural language through the Harness", async
   assert.equal(reloaded.state.stage1.revision, revision);
 });
 
-test("Decision mutations preserve recorded research evidence", async () => {
+test("Stage1 answer rejects the removed delegated option", async () => {
+  const fixture = await createFixture();
+  await initStage1(fixture.project, fixture.profile);
+
+  const result = spawnSync(
+    process.execPath,
+    [resolve("dist", "src", "cli.js"), "stage1", "answer", fixture.project, "D1", "a", "--delegated"],
+    { encoding: "utf8" },
+  );
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Unknown option --delegated/u);
+  const loaded = await loadStage1(fixture.project);
+  assert.equal(loaded.state.stage1.decisions.D1?.status, "pending");
+});
+
+test("Decision answers preserve research evidence and reopening invalidates it", async () => {
   const fixture = await createFixture();
   await initStage1(fixture.project, fixture.profile);
   await saveDecisionAdvice(
@@ -334,9 +547,225 @@ test("Decision mutations preserve recorded research evidence", async () => {
   loaded = await loadStage1(fixture.project);
   assert.equal(loaded.state.stage1.decisions.D2?.advicePath, ".assistant/advice/D2.json");
 
+  await reopenDecision(fixture.project, "D2", "Change the disposition to deferred.");
   await deferDecision(fixture.project, "D2", "Stage2", "Wait for implementation evidence");
   loaded = await loadStage1(fixture.project);
-  assert.equal(loaded.state.stage1.decisions.D2?.advicePath, ".assistant/advice/D2.json");
+  assert.equal(loaded.state.stage1.decisions.D2?.advicePath, undefined);
+  await assert.rejects(readFile(join(fixture.project, ".assistant", "advice", "D2.json"), "utf8"));
+});
+
+test("Reopening a Decision preserves its conclusion and invalidates stale advice and dependents", async () => {
+  const fixture = await createFixture();
+  await writeFile(
+    fixture.profile,
+    fixtureProfile().replace(
+      "architecture:\n",
+      `  - id: D3
+    topic: Third
+    question: Select the third option.
+    whyNow: It verifies transitive invalidation.
+    blocking: true
+    researchPolicy: conditional
+    dependsOn: [D2]
+    knownFacts: [fact]
+    recommendation: a
+    affectedArtifacts: [architecture/overview.md]
+    options:
+      - id: a
+        label: Option A
+        summary: Third option A.
+        consequences: [A consequence]
+      - id: b
+        label: Option B
+        summary: Third option B.
+        consequences: [B consequence]
+architecture:
+`,
+    ),
+    "utf8",
+  );
+  await initStage1(fixture.project, fixture.profile);
+  await saveDecisionAdvice(
+    fixture.project,
+    "D1",
+    `${JSON.stringify(adviceFixture("D1", "a"), null, 2)}\n`,
+  );
+  await answerDecision(fixture.project, "D1", "a");
+  await saveDecisionAdvice(
+    fixture.project,
+    "D2",
+    `${JSON.stringify(adviceFixture("D2", "b"), null, 2)}\n`,
+  );
+  await answerDecision(fixture.project, "D2", "b");
+  await answerDecision(fixture.project, "D3", "a");
+
+  const result = await reopenDecision(fixture.project, "D1", "The pipeline boundary changed.");
+  assert.deepEqual(result.invalidatedDecisionIds, ["D2", "D3"]);
+  const loaded = await loadStage1(fixture.project);
+  assert.equal(loaded.state.stage1.status, "DECISION_LOOP");
+  assert.equal(loaded.state.stage1.decisions.D1?.status, "pending");
+  assert.equal(loaded.state.stage1.decisions.D1?.advicePath, undefined);
+  assert.equal(loaded.state.stage1.decisions.D1?.revisions?.at(-1)?.kind, "reopened");
+  assert.equal(loaded.state.stage1.decisions.D1?.revisions?.at(-1)?.previous.selectedOption, "a");
+  assert.equal(loaded.state.stage1.decisions.D2?.status, "pending");
+  assert.equal(loaded.state.stage1.decisions.D2?.advicePath, undefined);
+  assert.equal(
+    loaded.state.stage1.decisions.D2?.revisions?.at(-1)?.kind,
+    "dependency_invalidated",
+  );
+  assert.equal(loaded.state.stage1.decisions.D3?.status, "pending");
+  assert.equal(
+    loaded.state.stage1.decisions.D3?.revisions?.at(-1)?.causeDecisionId,
+    "D1",
+  );
+  const next = getNextStage1Action(loaded.state, loaded.loadedProfile.profile);
+  assert.ok(next?.kind === "decision_ready" || next?.kind === "research_required");
+  assert.equal(next.decision.id, "D1");
+  assert.equal(next.decision.recommendation, "a");
+  assert.match(next.revision?.previousConclusion ?? "", /Option A/u);
+  await assert.rejects(readFile(join(fixture.project, ".assistant", "advice", "D1.json"), "utf8"));
+  await assert.rejects(readFile(join(fixture.project, ".assistant", "advice", "D2.json"), "utf8"));
+  await assert.rejects(readFile(join(fixture.project, "research", "stage1.md"), "utf8"));
+  const overview = await readFile(join(fixture.project, "architecture", "overview.md"), "utf8");
+  assert.match(overview, /修正记录/u);
+  assert.match(overview, /revision \d+，用户重开/u);
+  assert.match(overview, /因 D1 修正而失效/u);
+
+  await answerDecision(fixture.project, "D1", "b");
+  const corrected = await loadStage1(fixture.project);
+  assert.equal(corrected.state.stage1.decisions.D1?.revisions?.length, 1);
+  const correctedAction = getNextStage1Action(corrected.state, corrected.loadedProfile.profile);
+  assert.ok(
+    correctedAction?.kind === "decision_ready"
+      || correctedAction?.kind === "research_required",
+  );
+  assert.equal(correctedAction.decision.id, "D2");
+});
+
+test("Reopened custom Decisions use the previous conclusion as the revision baseline", async () => {
+  const fixture = await createFixture();
+  await writeFile(
+    fixture.profile,
+    fixtureProfile().replace("researchPolicy: conditional", "researchPolicy: required"),
+    "utf8",
+  );
+  await initStage1(fixture.project, fixture.profile);
+  await saveDecisionAdvice(
+    fixture.project,
+    "D1",
+    `${JSON.stringify(adviceFixture("D1", "a"), null, 2)}\n`,
+  );
+  const previousConclusion = "PF -> ICache -> IF -> Instruction Queue -> Issue/RR -> EX -> M1 -> M2/Retire。Issue 与组合寄存器读取合并，EX 产生 ALU 结果和 redirect，M1 保持程序年龄对齐，M2/Retire 完成写回与顺序退休，不设置独立 WB，不增加 Completion Queue，末尾约束不得丢失。";
+  const correctedConclusion = "PF -> ICache -> IF -> Instruction Queue -> Issue -> RR -> EX -> M1 -> M2/Retire";
+  await answerCustomDecision(fixture.project, "D1", previousConclusion, "此前讨论形成的完整流水级方案");
+  await answerDecision(fixture.project, "D2", "b");
+  await reopenDecision(fixture.project, "D1", "拆分 Issue 与 RR，并保留其余流水边界");
+
+  let loaded = await loadStage1(fixture.project);
+  let next = getNextStage1Action(loaded.state, loaded.loadedProfile.profile);
+  assert.equal(next?.kind, "research_required");
+  assert.equal(next?.decision.recommendation, "revise_previous");
+  assert.equal(next?.revision?.previousConclusion, previousConclusion);
+  assert.equal(next?.revision?.reason, "拆分 Issue 与 RR，并保留其余流水边界");
+  assert.equal(loaded.state.stage1.decisions.D1?.advicePath, undefined);
+  const packet = renderDecisionPacket(next?.decision as NonNullable<typeof next>["decision"], loaded.state);
+  assert.match(packet, /当前模式：修正此前结论/u);
+  assert.match(packet, /PF -> ICache -> IF -> Instruction Queue/u);
+  assert.match(packet, /拆分 Issue 与 RR/u);
+  const reopenedOverview = await readFile(
+    join(fixture.project, "architecture", "overview.md"),
+    "utf8",
+  );
+  assert.match(reopenedOverview, /末尾约束不得丢失/u);
+
+  const prompts: Array<{ task: string; prompt: string }> = [];
+  const executor: StructuredWorkerExecutor = async (call) => {
+    prompts.push({ task: call.task, prompt: call.prompt });
+    if (call.task === "research") {
+      return {
+        output: {
+          decisionId: "D1",
+          sources: [{
+            kind: "project",
+            locator: "architecture/overview.md",
+            revision: "fixture-revision",
+            accessedAt: "2026-08-30T00:00:00.000Z",
+            locations: ["流水级修正记录"],
+          }],
+          facts: [{
+            claim: "此次修正只要求拆分 Issue 与 RR。",
+            source: "architecture/overview.md#流水级修正记录",
+            confidence: "high",
+          }],
+          conflicts: [],
+          gaps: [],
+          evidenceSufficient: true,
+          stopReason: "修正范围与既有结论均已定位。",
+        },
+        threadId: "revision-research-thread",
+      };
+    }
+    return {
+      output: {
+        decisionId: "D1",
+        summary: "保留既有流水边界，只拆分 Issue 与 RR。",
+        optionAnalysis: [
+          {
+            optionId: "revise_previous",
+            benefits: ["保留此前已经闭合的边界"],
+            costs: ["需要更新 Issue/RR 接口"],
+            risks: [],
+          },
+          { optionId: "a", benefits: [], costs: [], risks: ["会丢失此前自定义边界"] },
+          { optionId: "b", benefits: [], costs: [], risks: ["会扩大本次修正范围"] },
+        ],
+        recommendation: "revise_previous",
+        proposedCustomAnswer: correctedConclusion,
+        rationale: ["该结论仅修复审查指出的问题。"],
+        openQuestions: [],
+      },
+      threadId: "revision-synthesis-thread",
+    };
+  };
+  await researchDecision(fixture.project, "D1", { executor });
+
+  loaded = await loadStage1(fixture.project);
+  next = getNextStage1Action(loaded.state, loaded.loadedProfile.profile);
+  assert.equal(next?.kind, "decision_ready");
+  assert.equal(next?.decision.recommendation, "revise_previous");
+  assert.equal(next?.revision?.proposedCustomAnswer, correctedConclusion);
+  assert.equal(loaded.state.stage1.decisions.D1?.research?.recommendation, "revise_previous");
+  assert.equal(loaded.state.stage1.decisions.D1?.research?.proposedCustomAnswer, correctedConclusion);
+  assert.match(prompts.find((item) => item.task === "research")?.prompt ?? "", /PF -> ICache/u);
+  assert.match(prompts.find((item) => item.task === "synthesis")?.prompt ?? "", /拆分 Issue 与 RR/u);
+  const memo = await readFile(join(fixture.project, "research", "stage1.md"), "utf8");
+  assert.match(memo, new RegExp(correctedConclusion.replaceAll("/", "\\/"), "u"));
+
+  await answerCustomDecision(
+    fixture.project,
+    "D1",
+    next?.revision?.proposedCustomAnswer ?? "",
+    "按修订建议确认",
+  );
+  loaded = await loadStage1(fixture.project);
+  assert.equal(loaded.state.stage1.decisions.D1?.customAnswer, correctedConclusion);
+});
+
+test("Reopen requires a closed unapproved Decision and an explicit reason", async () => {
+  const fixture = await createFixture();
+  await initStage1(fixture.project, fixture.profile);
+  await assert.rejects(reopenDecision(fixture.project, "D1", "reason"), /already pending/u);
+  await answerDecision(fixture.project, "D1", "a");
+  await assert.rejects(reopenDecision(fixture.project, "D1", "   "), /requires a reason/u);
+  await assert.rejects(
+    answerCustomDecision(fixture.project, "D1", "replacement"),
+    /run stage1 reopen/u,
+  );
+  await answerDecision(fixture.project, "D2", "b");
+  await reviewStage1(fixture.project);
+  await savePassingReview(fixture.project);
+  await approveStage1(fixture.project);
+  await assert.rejects(reopenDecision(fixture.project, "D1", "reason"), /already approved/u);
 });
 
 test("Advise reattaches valid orphan advice without invoking Codex", async () => {
@@ -644,6 +1073,7 @@ function fixtureResearchExecutor(
         { optionId: "b", benefits: [], costs: [], risks: ["性能收益较低"] },
       ],
       recommendation: "a",
+      proposedCustomAnswer: null,
       rationale: ["现有证据支持 a。"],
       openQuestions: evidenceSufficient ? [] : ["需要补充时序报告。"],
     };

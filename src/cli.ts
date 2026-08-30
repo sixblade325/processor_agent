@@ -11,6 +11,7 @@ import { renderDecisionPacket } from "./render.js";
 import {
   answerCustomDecision,
   answerDecision,
+  applyReviewCorrection,
   approveStage1,
   completeStage1,
   deferDecision,
@@ -19,10 +20,22 @@ import {
   loadStage1,
   probeEnvironment,
   refreshStage1Profile,
+  reopenDecision,
   reviewStage1,
   scaffoldStage1,
   summarizeStage1,
 } from "./stage1.js";
+import {
+  approveModuleDesign,
+  initStage2,
+  loadStage2,
+  reopenModuleDesign,
+  runActiveImplementation,
+  runModuleVerification,
+  runShadowDesign,
+  summarizeStage2,
+} from "./stage2.js";
+import type { Stage2NextAction, Stage2VerificationMode } from "./types.js";
 
 interface ParsedArguments {
   positional: string[];
@@ -41,8 +54,15 @@ async function main(): Promise<void> {
     return;
   }
   const command = input[1];
-  if (scope !== "stage1" || command === undefined) {
-    throw new Error("Use `processor-agent open <path>` or `processor-agent stage1 <command>`");
+  if (command === undefined) {
+    throw new Error("Use `processor-agent open <path>`, `processor-agent stage1 <command>`, or `processor-agent stage2 <command>`");
+  }
+  if (scope === "stage2") {
+    await commandStage2(command, parseArguments(input.slice(2)));
+    return;
+  }
+  if (scope !== "stage1") {
+    throw new Error("Use `processor-agent open <path>`, `processor-agent stage1 <command>`, or `processor-agent stage2 <command>`");
   }
   const args = parseArguments(input.slice(2));
   switch (command) {
@@ -63,6 +83,12 @@ async function main(): Promise<void> {
       break;
     case "defer":
       await commandDefer(args);
+      break;
+    case "reopen":
+      await commandReopen(args);
+      break;
+    case "correct":
+      await commandCorrect(args);
       break;
     case "probe":
       await commandProbe(args);
@@ -93,6 +119,91 @@ async function main(): Promise<void> {
       break;
     default:
       throw new Error(`Unknown Stage1 command: ${command}`);
+  }
+}
+
+async function commandStage2(command: string, args: ParsedArguments): Promise<void> {
+  switch (command) {
+    case "init": {
+      const loaded = await initStage2(requirePositional(args, 0, "project path"));
+      printStage2Summary(await summarizeStage2(loaded));
+      break;
+    }
+    case "status": {
+      const loaded = await loadStage2(requirePositional(args, 0, "project path"));
+      const summary = await summarizeStage2(loaded);
+      if (flag(args, "json")) {
+        process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+      } else {
+        printStage2Summary(summary);
+      }
+      break;
+    }
+    case "next": {
+      const loaded = await loadStage2(requirePositional(args, 0, "project path"));
+      const actions = (await summarizeStage2(loaded)).readyActions;
+      if (flag(args, "json")) {
+        process.stdout.write(`${JSON.stringify(actions, null, 2)}\n`);
+      } else {
+        printStage2Actions(actions);
+      }
+      break;
+    }
+    case "design": {
+      const result = await runShadowDesign(
+        requirePositional(args, 0, "project path"),
+        args.positional[1],
+        option(args, "instruction"),
+      );
+      process.stdout.write(
+        `Stage2 Design drafted: ${result.output.moduleId}\nrunId: ${result.runId}\nthreadId: ${result.threadId}\n`,
+      );
+      printStage2Summary(await summarizeStage2(result.loaded));
+      break;
+    }
+    case "approve": {
+      const mode = requireOption(args, "verification-mode");
+      if (mode !== "independent_workers" && mode !== "active_only") {
+        throw new Error(`Invalid --verification-mode: ${mode}`);
+      }
+      const loaded = await approveModuleDesign(
+        requirePositional(args, 0, "project path"),
+        requirePositional(args, 1, "module id"),
+        mode as Stage2VerificationMode,
+      );
+      printStage2Summary(await summarizeStage2(loaded));
+      break;
+    }
+    case "implement": {
+      const result = await runActiveImplementation(
+        requirePositional(args, 0, "project path"),
+        args.positional[1],
+      );
+      process.stdout.write(
+        `Stage2 implementation processed: ${result.output.moduleId}\nrunId: ${result.runId}\nthreadId: ${result.threadId}\n`,
+      );
+      printStage2Summary(await summarizeStage2(result.loaded));
+      break;
+    }
+    case "verify": {
+      const loaded = await runModuleVerification(
+        requirePositional(args, 0, "project path"),
+        args.positional[1],
+      );
+      printStage2Summary(await summarizeStage2(loaded));
+      break;
+    }
+    case "reopen": {
+      const loaded = await reopenModuleDesign(
+        requirePositional(args, 0, "project path"),
+        requirePositional(args, 1, "module id"),
+        requireOption(args, "reason"),
+      );
+      printStage2Summary(await summarizeStage2(loaded));
+      break;
+    }
+    default:
+      throw new Error(`Unknown Stage2 command: ${command}`);
   }
 }
 
@@ -151,20 +262,20 @@ async function commandNext(args: ParsedArguments): Promise<void> {
     process.stdout.write(
       `Research required: ${action.decision.id}\nRun: processor-agent stage1 research . ${action.decision.id}\n`,
     );
-  } else {
+  } else if (action.kind === "decision_ready") {
     process.stdout.write(renderDecisionPacket(action.decision, loaded.state));
+  } else {
+    printReviewAction(action);
   }
 }
 
 async function commandAnswer(args: ParsedArguments): Promise<void> {
+  assertOnlyOptions(args, ["note"]);
   const path = requirePositional(args, 0, "project path");
   const decision = requirePositional(args, 1, "decision id");
   const selected = requirePositional(args, 2, "option id");
   const note = option(args, "note");
-  const loaded = await answerDecision(path, decision, selected, {
-    ...(note === undefined ? {} : { note }),
-    delegated: flag(args, "delegated"),
-  });
+  const loaded = await answerDecision(path, decision, selected, note);
   printSummary(await summarizeStage1(loaded));
   printNext(loaded);
 }
@@ -187,6 +298,42 @@ async function commandDefer(args: ParsedArguments): Promise<void> {
     requireOption(args, "until"),
     requireOption(args, "note"),
   );
+  printSummary(await summarizeStage1(loaded));
+  printNext(loaded);
+}
+
+async function commandReopen(args: ParsedArguments): Promise<void> {
+  const path = requirePositional(args, 0, "project path");
+  const decision = requirePositional(args, 1, "decision id");
+  const result = await reopenDecision(path, decision, requireOption(args, "reason"));
+  process.stdout.write(`Reopened Decision: ${decision}\n`);
+  if (result.invalidatedDecisionIds.length > 0) {
+    process.stdout.write(`Invalidated dependents: ${result.invalidatedDecisionIds.join(", ")}\n`);
+  }
+  printSummary(await summarizeStage1(result.loaded));
+  printNext(result.loaded);
+}
+
+async function commandCorrect(args: ParsedArguments): Promise<void> {
+  assertOnlyOptions(args, ["patch-json", "reason", "source"]);
+  const path = requirePositional(args, 0, "project path");
+  const findingCodes = args.positional.slice(1);
+  const patchText = requireOption(args, "patch-json");
+  let patch: unknown;
+  try {
+    patch = JSON.parse(patchText);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid --patch-json: ${detail}`);
+  }
+  const loaded = await applyReviewCorrection(path, {
+    findingCodes,
+    patch,
+    rationale: requireOption(args, "reason"),
+    sources: options(args, "source"),
+  });
+  const correction = loaded.state.stage1.reviewCorrections?.at(-1);
+  process.stdout.write(`Applied Review Correction: ${correction?.id ?? "missing"}\n`);
   printSummary(await summarizeStage1(loaded));
   printNext(loaded);
 }
@@ -277,6 +424,64 @@ function printSummary(summary: Awaited<ReturnType<typeof summarizeStage1>>): voi
   );
 }
 
+function printStage2Summary(summary: Awaited<ReturnType<typeof summarizeStage2>>): void {
+  process.stdout.write(
+    [
+      `Project: ${summary.projectName}`,
+      `Stage2: ${summary.status}`,
+      `Revision: ${summary.revision}`,
+      `State epoch: ${summary.stateEpoch}`,
+      `Modules: ${summary.complete}/${summary.total} complete`,
+      ...(summary.active?.moduleId === undefined
+        ? []
+        : [`Active: slot ${summary.active.slot}, module ${summary.active.moduleId}`]),
+      ...(summary.shadow?.moduleId === undefined
+        ? []
+        : [`Shadow: slot ${summary.shadow.slot}, module ${summary.shadow.moduleId}`]),
+      ...(summary.blockers.length === 0 ? [] : summary.blockers.map((item) => `Blocker: ${item}`)),
+    ].join("\n") + "\n",
+  );
+}
+
+function printStage2Actions(actions: Stage2NextAction[]): void {
+  if (actions.length === 0) {
+    process.stdout.write("No ready Stage2 action.\n");
+    return;
+  }
+  for (const action of actions) {
+    switch (action.kind) {
+      case "shadow_design":
+        process.stdout.write(`Shadow Design: ${action.moduleId}, slot ${action.slot}\n`);
+        break;
+      case "design_revision":
+        process.stdout.write(
+          `Design revision required: ${action.moduleId}, ${action.designPath}, sha256=${action.designSha256}\n${action.issues.map((item) => `- ${item}`).join("\n")}\n`,
+        );
+        break;
+      case "design_approval":
+        process.stdout.write(
+          `Design approval required: ${action.moduleId}, ${action.designPath}, sha256=${action.designSha256}\n`,
+        );
+        break;
+      case "waiting_for_rotation":
+        process.stdout.write(`Design closed, waiting for rotation: ${action.moduleId}, slot ${action.slot}\n`);
+        break;
+      case "active_implementation":
+        process.stdout.write(`Active Implementation: ${action.moduleId}, slot ${action.slot}\n`);
+        break;
+      case "verification":
+        process.stdout.write(`Verification: ${action.moduleId}, mode=${action.mode}, slot ${action.slot}\n`);
+        break;
+      case "blocked":
+        process.stdout.write(`Blocked: ${action.moduleId}: ${action.blockers.join("; ")}\n`);
+        break;
+      case "baseline_complete":
+        process.stdout.write("Stage2 baseline is complete.\n");
+        break;
+    }
+  }
+}
+
 function printNext(loaded: Awaited<ReturnType<typeof loadStage1>>): void {
   const action = getNextStage1Action(loaded.state, loaded.loadedProfile.profile);
   if (action === undefined) {
@@ -287,9 +492,32 @@ function printNext(loaded: Awaited<ReturnType<typeof loadStage1>>): void {
     process.stdout.write(
       `Research required: ${action.decision.id}\nRun: processor-agent stage1 research . ${action.decision.id}\n`,
     );
-  } else {
+  } else if (action.kind === "decision_ready") {
     process.stdout.write(renderDecisionPacket(action.decision, loaded.state));
+  } else {
+    printReviewAction(action);
   }
+}
+
+function printReviewAction(
+  action: Extract<ReturnType<typeof getNextStage1Action>, { kind: "review_finding" | "audit_refresh_required" }>,
+): void {
+  if (action === undefined) {
+    return;
+  }
+  if (action.kind === "audit_refresh_required") {
+    process.stdout.write(`Audit refresh required: ${action.reason}\n`);
+    return;
+  }
+  process.stdout.write(
+    [
+      `Review finding: ${action.finding.code}`,
+      `Repair kind: ${action.finding.repairKind}`,
+      `Repair target: ${action.finding.repairTarget}`,
+      `Required closure: ${action.finding.requiredClosure.join("; ")}`,
+      `Finding: ${action.finding.message}`,
+    ].join("\n") + "\n",
+  );
 }
 
 function parseArguments(input: string[]): ParsedArguments {
@@ -345,6 +573,14 @@ function flag(args: ParsedArguments, name: string): boolean {
   return option(args, name) === "true";
 }
 
+function assertOnlyOptions(args: ParsedArguments, allowed: string[]): void {
+  const allowedSet = new Set(allowed);
+  const unknown = [...args.options.keys()].find((name) => !allowedSet.has(name));
+  if (unknown !== undefined) {
+    throw new Error(`Unknown option --${unknown}`);
+  }
+}
+
 function printHelp(): void {
   process.stdout.write(`processor-agent commands:
   open <path> [--print-prompt]
@@ -353,9 +589,11 @@ processor-agent stage1 commands:
   init <path> [--profile id] [--name name] [--goal text] [--use-case text]
   status <path> [--json]
   next <path> [--json]
-  answer <path> <decision-id> <option-id> [--note text] [--delegated]
+  answer <path> <decision-id> <option-id> [--note text]
   custom <path> <decision-id> --text text [--note text]
   defer <path> <decision-id> --until point --note rationale
+  reopen <path> <decision-id> --reason rationale
+  correct <path> <finding-code> [finding-code...] --patch-json json --reason rationale --source locator
   probe <path>
   profile-refresh <path> [--adopt-profile-defaults] [--reset-changed-advice]
   advise <path> [decision-id] [--refresh]
@@ -365,6 +603,16 @@ processor-agent stage1 commands:
   approve <path>
   scaffold <path>
   complete <path>
+
+processor-agent stage2 commands:
+  init <path>
+  status <path> [--json]
+  next <path> [--json]
+  design <path> [module-id] [--instruction text]
+  approve <path> <module-id> --verification-mode independent_workers|active_only
+  implement <path> [module-id]
+  verify <path> [module-id]
+  reopen <path> <module-id> --reason rationale
 `);
 }
 

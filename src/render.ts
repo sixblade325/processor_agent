@@ -1,10 +1,15 @@
 import { stringify } from "yaml";
 import { readText, resolveWithin } from "./io.js";
+import {
+  REVISE_PREVIOUS_OPTION_ID,
+  decisionRevisionContext,
+} from "./research.js";
 import type {
   DecisionAdvice,
   DecisionOption,
   DecisionSpec,
   ProjectProfile,
+  Stage1ProjectSpec,
   Stage1ProjectState,
 } from "./types.js";
 
@@ -35,6 +40,7 @@ export function renderDecisionPacket(
   decision: DecisionSpec,
   state: Stage1ProjectState,
 ): string {
+  const revision = decisionRevisionContext(decision, state);
   const lines = [
     `# ${decision.id}: ${decision.topic}`,
     "",
@@ -42,12 +48,25 @@ export function renderDecisionPacket(
     "",
     `为什么现在决定：${decision.whyNow}`,
     `调研策略：${decision.researchPolicy}`,
-    "",
-    "已知事实：",
-    ...decision.knownFacts.map((fact) => `- ${fact}`),
-    "",
-    "候选方案：",
   ];
+  if (revision !== undefined) {
+    lines.push("");
+    lines.push("当前模式：修正此前结论");
+    lines.push(`修正原因：${revision.reason}`);
+    lines.push(`此前结论：${revision.previousConclusion ?? revision.previousStatus}`);
+    if (revision.previousNote !== undefined) {
+      lines.push(`此前理由：${revision.previousNote}`);
+    }
+    if (revision.proposedCustomAnswer !== undefined) {
+      lines.push(`完整修订候选：${revision.proposedCustomAnswer}`);
+    }
+    lines.push("处理规则：此前结论是修订基线，未被新证据否定的内容继续保留；Profile 选项只作参考。");
+  }
+  lines.push("");
+  lines.push("已知事实：");
+  lines.push(...decision.knownFacts.map((fact) => `- ${fact}`));
+  lines.push("");
+  lines.push("候选方案：");
   for (const option of decision.options) {
     const marker = option.id === decision.recommendation ? "（推荐）" : "";
     lines.push(`- ${option.id}${marker}: ${option.label}`);
@@ -74,6 +93,7 @@ function renderArchitectureOverview(
   state: Stage1ProjectState,
   profile: ProjectProfile,
 ): string {
+  const spec = effectiveProjectSpec(state, profile);
   const approved = ["ARCHITECTURE_APPROVED", "PROJECT_SCAFFOLDED", "STAGE1_COMPLETE"].includes(
     state.stage1.status,
   );
@@ -112,11 +132,11 @@ function renderArchitectureOverview(
   lines.push("");
   lines.push("## 系统边界");
   lines.push("");
-  lines.push(...profile.architecture.systemBoundary.map((item) => `- ${item}`));
+  lines.push(...spec.architecture.systemBoundary.map((item) => `- ${item}`));
   lines.push("");
   lines.push("## 支持的指令");
   lines.push("");
-  lines.push(...profile.architecture.supportedInstructions.map((item) => `- ${item}`));
+  lines.push(...spec.architecture.supportedInstructions.map((item) => `- ${item}`));
   lines.push("");
   lines.push("## 架构决策");
   lines.push("");
@@ -151,17 +171,37 @@ function renderArchitectureOverview(
       lines.push("");
       lines.push(`用户说明：${decisionState.note}`);
     }
+    if ((decisionState?.revisions?.length ?? 0) > 0) {
+      lines.push("");
+      lines.push("修正记录：");
+      for (const revision of decisionState?.revisions ?? []) {
+        const previousOption = decision.options.find(
+          (candidate) => candidate.id === revision.previous.selectedOption,
+        );
+        const previousConclusion = previousOption?.label
+          ?? revision.previous.customAnswer
+          ?? (revision.previous.status === "deferred"
+            ? `延期至 ${revision.previous.deferredUntil ?? "未指定决策点"}`
+            : revision.previous.status);
+        const action = revision.kind === "reopened"
+          ? "用户重开"
+          : `因 ${revision.causeDecisionId} 修正而失效`;
+        lines.push(`- revision ${revision.revision}，${action}`);
+        lines.push(`  - 此前结论：${inlineText(previousConclusion)}`);
+        lines.push(`  - 原因：${inlineText(revision.reason)}`);
+      }
+    }
     lines.push("");
   }
   lines.push("## 全局不变量");
   lines.push("");
-  lines.push(...profile.architecture.invariants.map((item) => `- ${item}`));
+  lines.push(...spec.architecture.invariants.map((item) => `- ${item}`));
   lines.push("");
   lines.push("## 共享流水字段");
   lines.push("");
   lines.push("| 字段 | 语义 | 生产者 | 消费者 | 有效区间 |");
   lines.push("|---|---|---|---|---|");
-  for (const field of profile.architecture.sharedFields) {
+  for (const field of spec.architecture.sharedFields) {
     lines.push(
       `| ${escapeTable(field.name)} | ${escapeTable(field.semantics)} | ${escapeTable(field.producer)} | ${escapeTable(field.consumers.join(", "))} | ${escapeTable(`${field.validFrom} 至 ${field.validUntil}`)} |`,
     );
@@ -169,7 +209,7 @@ function renderArchitectureOverview(
   lines.push("");
   lines.push("## 全局协议");
   lines.push("");
-  for (const protocol of profile.architecture.globalProtocols) {
+  for (const protocol of spec.architecture.globalProtocols) {
     lines.push(`### ${protocol.id}`);
     lines.push("");
     lines.push(`责任模块：${protocol.owner}`);
@@ -179,7 +219,7 @@ function renderArchitectureOverview(
   }
   lines.push("## 性能计数器规则");
   lines.push("");
-  for (const counter of profile.architecture.counterRules) {
+  for (const counter of spec.architecture.counterRules) {
     lines.push(`- ${counter.name}: ${counter.increment}`);
     for (const exclusion of counter.exclusions) {
       lines.push(`  - 不计入：${exclusion}`);
@@ -216,6 +256,7 @@ function renderArchitectureOverview(
 }
 
 function renderModuleManifest(state: Stage1ProjectState, profile: ProjectProfile): string {
+  const spec = effectiveProjectSpec(state, profile);
   const approved = ["ARCHITECTURE_APPROVED", "PROJECT_SCAFFOLDED", "STAGE1_COMPLETE"].includes(
     state.stage1.status,
   );
@@ -228,8 +269,8 @@ function renderModuleManifest(state: Stage1ProjectState, profile: ProjectProfile
         id: profile.id,
         version: profile.version,
       },
-      systemBoundary: profile.architecture.systemBoundary,
-      supportedInstructions: profile.architecture.supportedInstructions,
+      systemBoundary: spec.architecture.systemBoundary,
+      supportedInstructions: spec.architecture.supportedInstructions,
       decisions: profile.decisions.map((decision) => {
         const decisionState = state.stage1.decisions[decision.id];
         const option = selectedOption(decision, state);
@@ -242,14 +283,14 @@ function renderModuleManifest(state: Stage1ProjectState, profile: ProjectProfile
           consequences: option?.consequences ?? [],
         };
       }),
-      sharedFields: profile.architecture.sharedFields,
-      globalProtocols: profile.architecture.globalProtocols,
-      counterRules: profile.architecture.counterRules,
-      decisionAcceptance: profile.verification.decisionAcceptance,
+      sharedFields: spec.architecture.sharedFields,
+      globalProtocols: spec.architecture.globalProtocols,
+      counterRules: spec.architecture.counterRules,
+      decisionAcceptance: spec.verification.decisionAcceptance,
       dependencySemantics:
         "dependsOn 记录模块消费的其他模块契约，允许经过寄存边界的反馈依赖；stage2Order 定义实施顺序。",
-      modules: profile.architecture.modules,
-      stage2Order: profile.architecture.stage2Order,
+      modules: spec.architecture.modules,
+      stage2Order: spec.architecture.stage2Order,
     },
     { lineWidth: 0 },
   );
@@ -259,6 +300,7 @@ function renderVerificationPlan(
   state: Stage1ProjectState,
   profile: ProjectProfile,
 ): string {
+  const spec = effectiveProjectSpec(state, profile);
   const lines = [
     "# 验证计划",
     "",
@@ -266,23 +308,23 @@ function renderVerificationPlan(
     "",
     "## 参考模型",
     "",
-    profile.verification.referenceModel,
+    spec.verification.referenceModel,
     "",
     "## 验证层级",
     "",
-    ...profile.verification.layers.map((item) => `- ${item}`),
+    ...spec.verification.layers.map((item) => `- ${item}`),
     "",
     "## 必测场景",
     "",
-    ...profile.verification.requiredScenarios.map((item) => `- ${item}`),
+    ...spec.verification.requiredScenarios.map((item) => `- ${item}`),
     "",
     "## 性能计数器",
     "",
-    ...profile.verification.counters.map((item) => `- ${item}`),
+    ...spec.verification.counters.map((item) => `- ${item}`),
     "",
     "## 计数语义",
     "",
-    ...profile.architecture.counterRules.flatMap((counter) => [
+    ...spec.architecture.counterRules.flatMap((counter) => [
       `- ${counter.name}: ${counter.increment}`,
       ...counter.exclusions.map((exclusion) => `  - 不计入：${exclusion}`),
     ]),
@@ -299,7 +341,7 @@ function renderVerificationPlan(
         lines.push(`  - ${consequence}`);
       }
     }
-    const acceptance = profile.verification.decisionAcceptance.find(
+    const acceptance = spec.verification.decisionAcceptance.find(
       (item) => item.decisionId === decision.id,
     );
     if (acceptance !== undefined) {
@@ -316,6 +358,16 @@ function renderVerificationPlan(
   lines.push("- 必需计数器均可观测，并遵守文档规定的计数规则。");
   lines.push("- 集成测试覆盖 stall、redirect、trap 和双发射行为。");
   return `${lines.join("\n")}\n`;
+}
+
+function effectiveProjectSpec(
+  state: Stage1ProjectState,
+  profile: ProjectProfile,
+): Stage1ProjectSpec {
+  return state.stage1.projectSpec ?? {
+    architecture: profile.architecture,
+    verification: profile.verification,
+  };
 }
 
 async function renderResearchMemo(
@@ -405,7 +457,9 @@ async function renderResearchMemo(
     lines.push("");
     for (const item of advice.optionAnalysis) {
       const option = decision.options.find((candidate) => candidate.id === item.optionId);
-      lines.push(`#### ${item.optionId}: ${option?.label ?? item.optionId}`);
+      const label = option?.label
+        ?? (item.optionId === REVISE_PREVIOUS_OPTION_ID ? "修订此前结论" : item.optionId);
+      lines.push(`#### ${item.optionId}: ${label}`);
       lines.push("");
       lines.push(`- 收益：${item.benefits.length === 0 ? "无已确认收益" : item.benefits.join("；")}`);
       lines.push(`- 成本：${item.costs.length === 0 ? "无已确认成本" : item.costs.join("；")}`);
@@ -415,6 +469,12 @@ async function renderResearchMemo(
     lines.push("### 综合建议");
     lines.push("");
     lines.push(`- 推荐：${advice.recommendation}`);
+    if (
+      typeof advice.proposedCustomAnswer === "string"
+      && advice.proposedCustomAnswer.trim() !== ""
+    ) {
+      lines.push(`- 完整修订候选：${advice.proposedCustomAnswer}`);
+    }
     lines.push(...advice.rationale.map((item) => `- 理由：${item}`));
     if (advice.openQuestions.length > 0) {
       lines.push("");
@@ -447,7 +507,11 @@ function escapeTable(value: string): string {
 }
 
 function oneLine(value: string): string {
-  return value.trim().replace(/\s+/gu, " ").slice(0, 160);
+  return inlineText(value).slice(0, 160);
+}
+
+function inlineText(value: string): string {
+  return value.trim().replace(/\s+/gu, " ");
 }
 
 function confidenceLabel(value: "low" | "medium" | "high"): string {

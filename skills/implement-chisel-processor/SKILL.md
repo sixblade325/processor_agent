@@ -1,6 +1,6 @@
 ---
 name: implement-chisel-processor
-description: Document-driven workflow for implementing and modifying Chisel processor and memory-subsystem RTL. Use when Codex must work from user-maintained architecture/design documents, preserve user implementation notes and code fragments, maintain separate agent-authored implementation documentation, reason in synthesized-hardware terms, avoid redundant or overprotective logic, and complete independent static review plus Verilator validation through subagents.
+description: Document-driven workflow for implementing and reviewing Chisel processor and memory-subsystem RTL. Use when Codex must work from approved architecture and design documents, reason in synthesized-hardware terms, avoid redundant or overprotective logic, add focused verification, or perform a static or verification review assigned by a workflow Harness.
 ---
 
 # Implement Chisel Processor
@@ -9,17 +9,16 @@ description: Document-driven workflow for implementing and modifying Chisel proc
 
 Read repository instructions first. Then locate and read, in order:
 
-1. User-maintained architecture and design documents.
-2. User-maintained module-local implementation document.
+1. Approved architecture and design documents.
+2. The current Task Envelope, allowed paths, and acceptance criteria.
 3. Current source, tests, generated reports, and relevant reference implementation.
-4. Agent-maintained `<SourceBase>_codex.md` if present.
 
 Treat the user's latest correction as authoritative. Design documents define
 target behavior after applying accepted corrections; source defines current
 behavior. Report corrections not yet reflected in documents. Never silently
 resolve a conflict. State the target, current implementation, and migration.
 
-Do not modify user-owned design documents unless explicitly requested. Treat module-local documents without `_codex` as user-owned. Prefer their code fragments and naming. If a fragment has a syntax, type, timing, or semantic error, report the exact issue before changing its meaning.
+Do not modify approved Architecture or Design. Prefer their code fragments and naming. If a fragment has a syntax, type, timing, or semantic error, report the exact issue as a Design gap before changing its meaning.
 
 ## Confirm design closure
 
@@ -60,28 +59,25 @@ Before each added condition, field, register, or mux, determine whether existing
 
 Organize substantial Scala source with the repository's required functional separators. Add concise comments only for cycle contracts, non-obvious invariants, intentional redundancy left for synthesis, and timing-sensitive choices.
 
-## Maintain three documentation layers
+## Respect workflow ownership
 
-Keep ownership explicit:
+When a Harness provides a Task Envelope:
 
-- Architecture/design documents: maintained by the user; define target semantics.
-- Module-local document without `_codex`: maintained by the user; supplies interfaces, local methods, names, and preferred snippets.
-- `<SourceBase>_codex.md`: maintained by the agent; records implemented behavior, event priority, assertions, verification, and timing risks.
-
-Update `_codex.md` with every source change. Follow repository line limits, commonly 100 lines per source document. Never use `_codex.md` to override user design.
+- treat Architecture, Design, allowed paths, verification mode, and gates in the envelope as authoritative;
+- return only the artifact type requested by the assigned role;
+- do not create `_codex.md`, handoff files, review reports, or state files unless the envelope explicitly allows them;
+- submit a structured Design-gap response with a concrete counterexample when implementation cannot preserve the approved Design;
+- leave formal state transitions, file writes, evidence projection, worker dispatch, and role rotation to the Harness.
 
 ## Verify and review
 
 Read [verification-review.md](references/verification-review.md). Add focused assertions and directed corner cases, then run Verilator as the default ChiselTest backend. Compilation alone is not verification.
 
-After primary verification, dispatch two independent subagents when the environment supports them:
+When assigned a static-review role, inspect source and documents for correctness, redundancy, overprotection, timing paths, dependency chains, assertion quality, and test gaps. When assigned a verification role, run or assess the approved commands and preserve commands, seeds, logs, failures, and concise conclusions.
 
-1. Static-review subagent: inspect source and documents for correctness, redundancy, overprotection, timing paths, dependency chains, assertion quality, and test gaps.
-2. Verification subagent: independently run tests, preserve commands, seeds, logs, failures, and concise conclusions.
+Do not dispatch additional agents from this Skill. The Harness chooses `independent_workers` or `active_only`, creates the required roles, and records whether evidence is independent.
 
-Give subagents raw paths and acceptance criteria. Do not leak the expected conclusion. Store their short reports in the module test directory using repository naming conventions. If subagents are unavailable, state that explicitly and perform two clearly separated local passes without claiming independence.
-
-Address valid findings, rerun affected tests, and update reports. Do not mark the task complete while required tests fail or sessions remain active.
+When an implementation task follows a failed review, address valid findings and rerun affected tests. Review roles report findings without modifying files. Do not report completion while required tests fail.
 
 ## Deliver
 
@@ -93,5 +89,5 @@ Report concisely:
 - event priority, assertions, and deliberately omitted redundant logic;
 - timing risks and any remaining dependency chain with location and scale;
 - Verilator commands, seeds, cycle counts, results, and log paths;
-- `_codex.md`, static-review report, and verification report paths;
+- Harness run ID, approved Design hash, and evidence paths supplied by the task;
 - unresolved issues or unverified behavior.
