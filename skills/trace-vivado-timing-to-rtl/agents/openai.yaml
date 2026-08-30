@@ -1,0 +1,4 @@
+interface:
+  display_name: "Trace Vivado Timing to RTL"
+  short_description: "构建全架构路径族并逐级映射Vivado物理路径到RTL"
+  default_prompt: "Use $trace-vivado-timing-to-rtl to build the endpoint-worst path universe, compare path-family migration, trace limiting routed paths at primitive and net granularity, map them to the implemented RTL snapshot, and rank evidence-backed modification directions."

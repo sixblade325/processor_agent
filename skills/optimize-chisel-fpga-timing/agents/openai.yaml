@@ -1,0 +1,4 @@
+interface:
+  display_name: "Optimize Chisel FPGA Timing"
+  short_description: "基于周期语义、RTL拓扑与routed DCP证据优化Chisel FPGA时序"
+  default_prompt: "Use $optimize-chisel-fpga-timing to diagnose and optimize this Chisel FPGA timing path while preserving cycle semantics and validating the result with emitted RTL and routed implementation evidence."

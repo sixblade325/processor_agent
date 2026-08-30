@@ -1,0 +1,4 @@
+interface:
+  display_name: "Implement Chisel Processor"
+  short_description: "文档驱动的 Chisel 处理器实现、审查与验证流程"
+  default_prompt: "Use $implement-chisel-processor to implement this processor module from the maintained design documents and complete review and Verilator validation."

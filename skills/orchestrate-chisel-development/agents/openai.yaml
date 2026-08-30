@@ -1,0 +1,4 @@
+interface:
+  display_name: "Orchestrate Chisel Development"
+  short_description: "协调轮转式 Chisel 设计、实现、审查与验证工作流"
+  default_prompt: "Use $orchestrate-chisel-development to coordinate rotating design and implementation agents for the current Chisel processor modules."

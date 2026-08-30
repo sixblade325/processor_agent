@@ -1,0 +1,4 @@
+interface:
+  display_name: "Chisel Processor Design"
+  short_description: "构思Chisel处理器微架构并闭合周期语义、正确性与设计文档"
+  default_prompt: "Use $design-chisel-processor to develop and document a Chisel processor microarchitecture design."

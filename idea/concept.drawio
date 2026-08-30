@@ -1,0 +1,46 @@
+<mxfile host="Electron">
+  <diagram name="第 1 页" id="H3tsQ1TYtQ6TyY6rQ0MG">
+    <mxGraphModel dx="591" dy="850" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="827" pageHeight="1169" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="k-OvgA_MaZWSp9m1eDZd-12" edge="1" parent="1" source="k-OvgA_MaZWSp9m1eDZd-4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="k-OvgA_MaZWSp9m1eDZd-5">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="k-OvgA_MaZWSp9m1eDZd-4" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="" vertex="1">
+          <mxGeometry height="440" width="190" x="5" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="k-OvgA_MaZWSp9m1eDZd-1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="Resrearch" vertex="1">
+          <mxGeometry height="60" width="120" x="40" y="260" as="geometry" />
+        </mxCell>
+        <mxCell id="k-OvgA_MaZWSp9m1eDZd-2" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="&lt;div&gt;ISA&lt;/div&gt;&lt;div&gt;总纲&lt;/div&gt;协议&lt;div&gt;总设计&lt;/div&gt;&lt;div&gt;流水级&lt;/div&gt;" vertex="1">
+          <mxGeometry height="120" width="120" x="40" y="360" as="geometry" />
+        </mxCell>
+        <mxCell id="k-OvgA_MaZWSp9m1eDZd-3" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="communication" vertex="1">
+          <mxGeometry height="60" width="120" x="40" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="k-OvgA_MaZWSp9m1eDZd-5" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="" vertex="1">
+          <mxGeometry height="440" width="400" x="280" y="200" as="geometry" />
+        </mxCell>
+        <mxCell id="k-OvgA_MaZWSp9m1eDZd-9" edge="1" parent="1" source="k-OvgA_MaZWSp9m1eDZd-6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="k-OvgA_MaZWSp9m1eDZd-7">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="k-OvgA_MaZWSp9m1eDZd-6" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="Design" vertex="1">
+          <mxGeometry height="60" width="120" x="340" y="300" as="geometry" />
+        </mxCell>
+        <mxCell id="k-OvgA_MaZWSp9m1eDZd-10" edge="1" parent="1" source="k-OvgA_MaZWSp9m1eDZd-7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" target="k-OvgA_MaZWSp9m1eDZd-8">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="k-OvgA_MaZWSp9m1eDZd-7" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="Impliment" vertex="1">
+          <mxGeometry height="60" width="120" x="510" y="300" as="geometry" />
+        </mxCell>
+        <mxCell id="k-OvgA_MaZWSp9m1eDZd-11" edge="1" parent="1" source="k-OvgA_MaZWSp9m1eDZd-8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" target="k-OvgA_MaZWSp9m1eDZd-6">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="k-OvgA_MaZWSp9m1eDZd-8" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="veriation" vertex="1">
+          <mxGeometry height="60" width="120" x="420" y="470" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
