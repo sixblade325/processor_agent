@@ -5,6 +5,7 @@ import {
   auditStage1Architecture,
   buildWorkspaceAgentPrompt,
   openWorkspaceAgent,
+  researchDecision,
 } from "./agent-runtime.js";
 import { renderDecisionPacket } from "./render.js";
 import {
@@ -13,7 +14,7 @@ import {
   approveStage1,
   completeStage1,
   deferDecision,
-  findNextDecision,
+  getNextStage1Action,
   initStage1,
   loadStage1,
   probeEnvironment,
@@ -71,6 +72,9 @@ async function main(): Promise<void> {
       break;
     case "advise":
       await commandAdvise(args);
+      break;
+    case "research":
+      await commandResearch(args);
       break;
     case "review":
       await commandReview(args);
@@ -136,15 +140,19 @@ async function commandStatus(args: ParsedArguments): Promise<void> {
 
 async function commandNext(args: ParsedArguments): Promise<void> {
   const loaded = await loadStage1(requirePositional(args, 0, "project path"));
-  const decision = findNextDecision(loaded.state, loaded.loadedProfile.profile);
-  if (decision === undefined) {
+  const action = getNextStage1Action(loaded.state, loaded.loadedProfile.profile);
+  if (action === undefined) {
     process.stdout.write(`No ready decision. Current state: ${loaded.state.stage1.status}\n`);
     return;
   }
   if (flag(args, "json")) {
-    process.stdout.write(`${JSON.stringify(decision, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(action, null, 2)}\n`);
+  } else if (action.kind === "research_required") {
+    process.stdout.write(
+      `Research required: ${action.decision.id}\nRun: processor-agent stage1 research . ${action.decision.id}\n`,
+    );
   } else {
-    process.stdout.write(renderDecisionPacket(decision, loaded.state));
+    process.stdout.write(renderDecisionPacket(action.decision, loaded.state));
   }
 }
 
@@ -209,6 +217,25 @@ async function commandAdvise(args: ParsedArguments): Promise<void> {
   process.stdout.write(`${JSON.stringify(advice, null, 2)}\n`);
 }
 
+async function commandResearch(args: ParsedArguments): Promise<void> {
+  const question = option(args, "question");
+  const scope = option(args, "scope");
+  const sources = options(args, "source");
+  const result = await researchDecision(
+    requirePositional(args, 0, "project path"),
+    args.positional[1],
+    {
+      refresh: flag(args, "refresh"),
+      request: {
+        ...(question === undefined ? {} : { question }),
+        ...(sources.length === 0 ? {} : { sources }),
+        ...(scope === undefined ? {} : { scope }),
+      },
+    },
+  );
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+}
+
 async function commandReview(args: ParsedArguments): Promise<void> {
   const loaded = await reviewStage1(requirePositional(args, 0, "project path"));
   printSummary(await summarizeStage1(loaded));
@@ -251,10 +278,17 @@ function printSummary(summary: Awaited<ReturnType<typeof summarizeStage1>>): voi
 }
 
 function printNext(loaded: Awaited<ReturnType<typeof loadStage1>>): void {
-  const decision = findNextDecision(loaded.state, loaded.loadedProfile.profile);
-  if (decision !== undefined) {
-    process.stdout.write("\n");
-    process.stdout.write(renderDecisionPacket(decision, loaded.state));
+  const action = getNextStage1Action(loaded.state, loaded.loadedProfile.profile);
+  if (action === undefined) {
+    return;
+  }
+  process.stdout.write("\n");
+  if (action.kind === "research_required") {
+    process.stdout.write(
+      `Research required: ${action.decision.id}\nRun: processor-agent stage1 research . ${action.decision.id}\n`,
+    );
+  } else {
+    process.stdout.write(renderDecisionPacket(action.decision, loaded.state));
   }
 }
 
@@ -325,6 +359,7 @@ processor-agent stage1 commands:
   probe <path>
   profile-refresh <path> [--adopt-profile-defaults] [--reset-changed-advice]
   advise <path> [decision-id] [--refresh]
+  research <path> [decision-id] [--question text] [--source locator] [--scope text] [--refresh]
   review <path>
   audit <path>
   approve <path>

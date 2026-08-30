@@ -13,13 +13,21 @@ import {
   writeNewOrSame,
 } from "./io.js";
 import { loadProfile } from "./profile.js";
+import {
+  hasCurrentSufficientResearch,
+  normalizeResearchRequest,
+  researchContextFingerprint,
+  researchRequestFingerprint,
+} from "./research.js";
 import { renderFormalDocuments } from "./render.js";
 import type {
+  DecisionResearchState,
   DecisionSpec,
   InitOptions,
   LoadedProfile,
   ArchitectureReviewReport,
   ProjectProfile,
+  Stage1NextAction,
   Stage1ProjectState,
   Stage1Summary,
 } from "./types.js";
@@ -160,21 +168,30 @@ export async function refreshStage1Profile(
   const nextSpecs = new Map(next.profile.decisions.map((decision) => [decision.id, decision]));
   const staleAdvicePaths: string[] = [];
   for (const [decisionId, decisionState] of Object.entries(state.stage1.decisions)) {
-    const carriesUserState = decisionState.status !== "pending" || decisionState.advicePath !== undefined;
+    const carriesUserState = decisionState.status !== "pending"
+      || decisionState.advicePath !== undefined
+      || decisionState.research !== undefined;
     if (!carriesUserState) {
       continue;
     }
     const previous = previousSpecs.get(decisionId);
     const replacement = nextSpecs.get(decisionId);
-    if (previous === undefined || replacement === undefined || !sameValue(previous, replacement)) {
+    if (
+      previous === undefined
+      || replacement === undefined
+      || !sameDecisionContract(previous, replacement)
+    ) {
       if (
         options.resetChangedAdvice === true
         && decisionState.status === "pending"
-        && decisionState.advicePath !== undefined
+        && (decisionState.advicePath !== undefined || decisionState.research !== undefined)
         && replacement !== undefined
       ) {
-        staleAdvicePaths.push(decisionState.advicePath);
+        if (decisionState.advicePath !== undefined) {
+          staleAdvicePaths.push(decisionState.advicePath);
+        }
         delete decisionState.advicePath;
+        delete decisionState.research;
         continue;
       }
       throw new Error(`Profile refresh changes active decision ${decisionId}`);
@@ -229,6 +246,27 @@ export function findNextDecision(
   });
 }
 
+export function getNextStage1Action(
+  state: Stage1ProjectState,
+  profile: ProjectProfile,
+): Stage1NextAction | undefined {
+  const decision = findNextDecision(state, profile);
+  if (decision === undefined) {
+    return undefined;
+  }
+  if (decision.researchPolicy !== "required" || hasCurrentSufficientResearch(decision, state)) {
+    return { kind: "decision_ready", decision };
+  }
+  const request = normalizeResearchRequest(decision);
+  const contextFingerprint = researchContextFingerprint(decision, state);
+  return {
+    kind: "research_required",
+    decision,
+    request,
+    fingerprint: researchRequestFingerprint(contextFingerprint, request),
+  };
+}
+
 export async function answerDecision(
   projectPath: string,
   decisionId: string,
@@ -242,17 +280,20 @@ export async function answerDecision(
   await assertGeneratedDocumentsCurrent(root, state);
   const decision = requireDecision(profile, decisionId);
   assertDependenciesClosed(state, decision);
+  await assertRequiredResearchComplete(root, state, decision);
   const option = decision.options.find((candidate) => candidate.id === optionId);
   if (option === undefined) {
     throw new Error(`Unknown option ${optionId} for ${decisionId}`);
   }
   const advicePath = state.stage1.decisions[decisionId]?.advicePath;
+  const research = state.stage1.decisions[decisionId]?.research;
   state.stage1.decisions[decisionId] = {
     status: options.delegated ? "delegated" : "answered",
     selectedOption: optionId,
     answeredAt: new Date().toISOString(),
     ...(options.note === undefined ? {} : { note: options.note }),
     ...(advicePath === undefined ? {} : { advicePath }),
+    ...(research === undefined ? {} : { research }),
   };
   delete state.stage1.review;
   updateDecisionLoopState(state, profile);
@@ -278,13 +319,16 @@ export async function answerCustomDecision(
   await assertGeneratedDocumentsCurrent(root, state);
   const decision = requireDecision(profile, decisionId);
   assertDependenciesClosed(state, decision);
+  await assertRequiredResearchComplete(root, state, decision);
   const advicePath = state.stage1.decisions[decisionId]?.advicePath;
+  const research = state.stage1.decisions[decisionId]?.research;
   state.stage1.decisions[decisionId] = {
     status: "answered",
     customAnswer: answer.trim(),
     answeredAt: new Date().toISOString(),
     ...(note === undefined ? {} : { note }),
     ...(advicePath === undefined ? {} : { advicePath }),
+    ...(research === undefined ? {} : { research }),
   };
   delete state.stage1.review;
   updateDecisionLoopState(state, profile);
@@ -310,13 +354,16 @@ export async function deferDecision(
   await assertGeneratedDocumentsCurrent(root, state);
   const decision = requireDecision(profile, decisionId);
   assertDependenciesClosed(state, decision);
+  await assertRequiredResearchComplete(root, state, decision);
   const advicePath = state.stage1.decisions[decisionId]?.advicePath;
+  const research = state.stage1.decisions[decisionId]?.research;
   state.stage1.decisions[decisionId] = {
     status: "deferred",
     deferredUntil: deferredUntil.trim(),
     note: note.trim(),
     answeredAt: new Date().toISOString(),
     ...(advicePath === undefined ? {} : { advicePath }),
+    ...(research === undefined ? {} : { research }),
   };
   delete state.stage1.review;
   updateDecisionLoopState(state, profile);
@@ -488,9 +535,10 @@ export async function summarizeStage1(loaded: LoadedProject): Promise<Stage1Summ
     blockers: effectiveBlockers,
     approvalCurrent,
   };
-  const nextDecision = findNextDecision(state, profile);
-  if (nextDecision !== undefined) {
-    summary.nextDecision = nextDecision;
+  const nextAction = getNextStage1Action(state, profile);
+  if (nextAction !== undefined) {
+    summary.nextAction = nextAction;
+    summary.nextDecision = nextAction.decision;
   }
   return summary;
 }
@@ -513,6 +561,7 @@ export async function saveDecisionAdvice(
   projectPath: string,
   decisionId: string,
   adviceContent: string,
+  research?: DecisionResearchState,
 ): Promise<LoadedProject> {
   const loaded = await loadStage1(projectPath);
   const { root, state } = loaded;
@@ -527,6 +576,9 @@ export async function saveDecisionAdvice(
     throw new Error(`Decision state missing: ${decisionId}`);
   }
   current.advicePath = advicePath;
+  if (research !== undefined) {
+    current.research = research;
+  }
   delete state.stage1.review;
   recordEvent(state, "DECISION_ADVICE_RECORDED", decisionId);
   await syncFormalDocuments(root, state, profile, true);
@@ -690,10 +742,13 @@ async function ensureProjectRules(root: string): Promise<void> {
 
 1. 项目存在 \`.assistant/project.yaml\` 时，通过 \`processor-agent open <path>\` 启动面向用户的 Workspace Agent。
 2. Stage1 状态查询、决策提交、审查、批准和骨架生成必须调用 \`processor-agent stage1 ...\`，不得用直接编辑替代 Harness 命令。
-3. Workspace Agent 每轮根据磁盘中的 \`status\` 和 \`next\` 解释用户自然语言，只处理一个 ready Decision。
-4. Agent 推荐不能视为用户批准。\`approve\`、delegated decision 和自定义架构结论都要求用户明确授权。
-5. Harness 命令失败时保留当前状态并报告恢复条件，不得手工修改状态或哈希。
-6. Workspace Agent 内不得递归调用 \`processor-agent open\`。
+3. Workspace Agent 每轮根据磁盘中的 \`status\` 和 \`next\` 解释用户自然语言，只处理一个 ready Decision 或一个 required Research Task。
+4. \`next\` 返回 \`research_required\` 时，必须先调用 \`processor-agent stage1 research\`，证据充分后才能提交该 Decision。
+5. 用户要求研究仓库、论文、URL 或源码范围时，必须把问题和来源交给 Harness Research Task。影响正式决策的来源调研不得只存在于 Workspace Agent 主上下文。
+6. Research Worker 负责来源与事实，Synthesis Worker 只基于结构化 Evidence 比较候选项。正式输出必须记录 cacheHit、fingerprint、runId、worker thread id 和 evidenceSufficient。
+7. Agent 推荐不能视为用户批准。\`approve\`、delegated decision 和自定义架构结论都要求用户明确授权。
+8. Harness 命令失败时保留当前状态并报告恢复条件，不得手工修改状态或哈希。
+9. Workspace Agent 内不得递归调用 \`processor-agent open\`。
 `;
   await writeNewOrSame(path, content);
 }
@@ -857,6 +912,9 @@ function stage1GateBlockers(state: Stage1ProjectState, profile: ProjectProfile):
         blockers.push(`${decision.id} is deferred without a decision point and rationale`);
       }
     }
+    if (decision.researchPolicy === "required" && !hasRecordedSufficientResearch(state, decision)) {
+      blockers.push(`${decision.id} requires sufficient research evidence`);
+    }
   }
   return blockers;
 }
@@ -904,6 +962,35 @@ function assertDependenciesClosed(state: Stage1ProjectState, decision: DecisionS
   }
 }
 
+async function assertRequiredResearchComplete(
+  root: string,
+  state: Stage1ProjectState,
+  decision: DecisionSpec,
+): Promise<void> {
+  if (decision.researchPolicy !== "required") {
+    return;
+  }
+  const current = state.stage1.decisions[decision.id];
+  const evidenceExists = current?.advicePath !== undefined
+    && await pathExists(resolveWithin(root, current.advicePath));
+  if (!evidenceExists || !hasCurrentSufficientResearch(decision, state)) {
+    throw new Error(
+      `Decision ${decision.id} requires current sufficient research; run stage1 research first`,
+    );
+  }
+}
+
+function hasRecordedSufficientResearch(
+  state: Stage1ProjectState,
+  decision: DecisionSpec,
+): boolean {
+  const current = state.stage1.decisions[decision.id];
+  if (current?.advicePath === undefined) {
+    return false;
+  }
+  return current.research?.evidenceSufficient ?? true;
+}
+
 function requireDecision(profile: ProjectProfile, decisionId: string): DecisionSpec {
   const decision = profile.decisions.find((item) => item.id === decisionId);
   if (decision === undefined) {
@@ -937,6 +1024,13 @@ function ensureFinalNewline(content: string): string {
 
 function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function sameDecisionContract(left: DecisionSpec, right: DecisionSpec): boolean {
+  return sameValue(
+    { ...left, researchPolicy: null },
+    { ...right, researchPolicy: null },
+  );
 }
 
 function migrateDefaultIntent(

@@ -30,11 +30,13 @@ Stage1 负责全局 Architecture、共享边界、项目级验证策略、实施
 
 ## 1.1 当前实现快照
 
-截至 2026-08-30，Stage1 已实现 Profile 驱动的初始化、环境探测、决策依赖图、Codex CLI 单项建议、建议缓存与显式刷新、正式文档同步、独立架构审查、批准哈希、项目骨架生成、WSL smoke check、未批准 Profile 更新和 Workspace Agent 自然语言入口。
+截至 2026-08-30，Stage1 已实现 Profile 驱动的初始化、环境探测、决策依赖图、Decision 级 Research Task、指纹缓存与显式刷新、正式文档同步、独立架构审查、批准哈希、项目骨架生成、WSL smoke check、未批准 Profile 更新和 Workspace Agent 自然语言入口。
 
-`dual_issue_demo` Profile `0.6.2` 已完成中文化、Decision 到验收点的显式映射以及控制流目标和 Store 可见性边界闭合。隔离端到端运行通过独立架构审查且无 finding，并在 WSL 中通过 SBT 编译。实际 `E:\107\dual_issue_demo` 已迁移到 `0.6.2`，当前停在 `S1_DEC_003`。
+`dual_issue_demo` Profile `0.7.0` 已为八个 Decision 声明 `researchPolicy`。隔离端到端运行通过独立架构审查且无 finding，并在 WSL 中通过 SBT 编译。实际 `E:\107\dual_issue_demo` 已迁移到 `0.7.0`，当前动作为 `S1_DEC_007` 的 required Research Task。
 
 当前恢复能力覆盖正常关闭后从 `.assistant/project.yaml` 和 Profile 快照继续执行。命令中断期间的多文件事务恢复、批准后的显式 reopen、自由形式 discovery 与 synthesis、本地 Web 界面进入后续实现。
+
+Research Task 接收用户指定的问题、仓库、URL 和范围。Research Worker 负责来源与事实，Synthesis Worker 只读取结构化 Evidence。Harness 记录请求指纹、缓存命中、run ID、两个 Worker thread ID、证据充分性和停止原因。`advise` 作为默认请求的兼容入口保留。
 
 用户项目中的人类可读 Stage1 产物默认使用中文。模块名、信号名、字段名、路径、命令、代码和机器状态 key 保持英文。新项目没有 `AGENTS.md` 时生成严格版协作约束，已有文件不自动覆盖。
 
@@ -124,6 +126,24 @@ Decision Question
 
 调研达到当前决策所需的证据阈值后停止。第一版优先使用固定的本地资料和官方来源，实时网络检索作为补充。原始下载和临时结果进入工作区级 `.runtime/`，可复现结论进入用户项目 `research/`。
 
+### 5.4 已实现的 Research Task 机制
+
+Stage1 按以下机制执行正式调研：
+
+1. 每个 Decision 声明 `researchPolicy: required | conditional | none`。
+2. `required` Decision 在展示前必须具有与当前输入匹配的有效调研；`conditional` 在用户要求来源、比较或指定外部材料时触发；`none` 直接使用项目事实和 Profile 内容。
+3. `next` 保持只读。缺少必要调研时返回 `kind: research_required`，证据有效时返回 `kind: decision_ready`，由 Workspace Agent 调用 Harness 执行。
+4. Research Request 至少包含 `decisionId`、`question`、`sources` 和可选 `scope`。用户指定的仓库、URL 和问题必须进入该请求，不能只保留在 Workspace Agent 上下文中。
+5. 缓存指纹由 Decision Packet、问题、来源、已确认依赖决策、相关正式文档哈希和 Research Prompt 版本共同计算。输入变化时启动新任务，相同指纹直接复用。
+6. Research Worker 只负责来源收集和证据整理，输出来源定位、revision 或 commit、访问时间、事实、冲突、缺口、`evidenceSufficient` 和 `stopReason`。
+7. Synthesis Worker 只读取 Decision Packet 和已经校验的 Research Evidence，负责完整比较候选方案并形成推荐，不自行补充来源。
+8. Harness 输出 `cacheHit`、`fingerprint`、`runId`、Research Worker `threadId`、Synthesis Worker `threadId` 和证据充分性，使 Workspace Agent 可以向用户说明本次结果来自缓存还是新任务。
+9. 正式机器结果继续写入 `.assistant/advice/<decision-id>.json`，历史运行保存在现有工作区级 `.runtime/`。不新增顶层目录和按版本命名的正式文件。
+10. `research/stage1.md` 投影调研问题、范围、来源定位、访问时间、事实、冲突、证据缺口、全部候选项的收益、成本与风险、Worker 推荐、用户最终结论和请求指纹。
+11. 正式调研必须经 Harness 创建和落盘。Workspace Agent 收到自由形式仓库调研请求时负责构造 Research Request，不直接完成会影响架构决策的临时调研。
+
+兼容策略：保留 `stage1 advise` 作为默认 Research Request 入口，新增可携带 `question`、`source` 和 `scope` 的 `stage1 research`。已有 advice 在新指纹规则下迁移为无额外来源的默认请求结果。
+
 ## 6. 决策与批准
 
 ### 6.1 信息分类
@@ -203,16 +223,16 @@ Stage1 按以下主题推进：
 
 用户始终面对一个 Workspace Agent。Harness 拥有交互状态、问题队列、审批和恢复逻辑。Codex CLI 通过结构化任务生成调研、方案和文档更新。
 
-第一版入口为 `processor-agent open <path>`。该命令校验 Stage1 项目和 Codex CLI，随后在项目根目录启动交互式 Codex，并注入固定 Workspace Agent 协议。协议要求 Agent 每轮重新查询 `status` 和 `next`，将自然语言映射到现有 Harness 命令，只展示一个 ready Decision，并保留 delegated decision 和 Architecture Approval 的显式用户门禁。Harness 命令仍是状态与正式草案的唯一写入口。
+第一版入口为 `processor-agent open <path>`。该命令校验 Stage1 项目和 Codex CLI，随后在项目根目录启动交互式 Codex，并注入固定 Workspace Agent 协议。协议要求 Agent 每轮重新查询 `status` 和 `next`，自动执行 required Research Task，将用户指定来源写入 Research Request，只展示一个 ready Decision，并保留 delegated decision 和 Architecture Approval 的显式用户门禁。Harness 命令仍是状态与正式草案的唯一写入口。
 
 ## 8. Agent 配置
 
-第一版 Stage1 使用一个逻辑 Architecture Agent：
+第一版 Stage1 对用户保持一个 Workspace Agent，并按任务启动短生命周期 Worker：
 
 1. `discovery` 任务收集目标、环境和已有事实。
-2. `research` 任务完成单个 Decision Question 的来源调研。
+2. Research Worker 完成单个 Decision Question 的来源调研和 Evidence 输出。
 3. `architecture` 任务生成候选方案、Decision Packet 和文档草案。
-4. `synthesis` 任务同步已确认决策并准备最终审阅。
+4. Synthesis Worker 只基于 Evidence 比较候选项并形成建议。
 
 各任务可以使用新的 Codex 上下文。持久状态全部来自项目文件。
 
@@ -339,5 +359,9 @@ baseline 禁止 `lane0 -> lane1` 同拍 RAW 配对属于需要用户批准的架
 8. `processor-agent open` 可以启动 Workspace Agent，自动查询 Harness，并把自然语言“按推荐”提交为当前 Decision 的推荐 option。
 9. Decision 回答、自定义和延期后仍保留对应调研证据；旧版本产生的孤立建议可以在不调用 Codex 的情况下自动重新挂接。
 10. `stage1 advise` 默认复用有效建议，并支持 `--refresh` 显式重新调研。
+11. `stage1 research` 接收 `question`、重复的 `source` 和 `scope`，相同指纹命中缓存。
+12. required Decision 在证据充分前不能回答；`next` 自动返回 Research Task。
+13. Research 与 Synthesis 使用独立只读 Codex Worker，运行记录进入工作区级 `.runtime/`。
+14. 自动测试覆盖 20 项，包括三种 research policy、required 门禁、证据不足、双 Worker、指纹缓存、完整 Research Memo 和 legacy advice 迁移。
 
 隔离端到端验证覆盖 `init -> decisions -> review -> audit -> approve -> scaffold -> complete`，最终状态为 `STAGE1_COMPLETE`。Workspace Agent 端到端验证覆盖 `open -> status -> next -> 自然语言回答 -> answer -> next`。Stage2 首模块任务包生成等待 Stage2 开发。

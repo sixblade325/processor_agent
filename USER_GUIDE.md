@@ -33,7 +33,8 @@ user_project/
 │   └── plan.md               验证策略和完成门禁
 └── .assistant/
     ├── project.yaml          Stage1 状态、revision、哈希和历史
-    └── profile.yaml          当前项目使用的 Profile 快照
+    ├── profile.yaml          当前项目使用的 Profile 快照
+    └── advice/               每个 Decision 的结构化调研结果，按需创建
 ```
 
 `architecture/`、`design/`、`src/`、`verification/` 和 `experiments/` 是项目正式资产。`.assistant/` 由 Processor Agent 维护，用户不应手工修改其中的状态和哈希。
@@ -93,20 +94,21 @@ npm link
 processor-agent open E:\107\my_core
 ```
 
-`open` 会先校验 Stage1 项目和 Codex CLI，再把固定的 Workspace Agent 协议作为初始任务交给 Codex。Agent 随后自动读取项目 `AGENTS.md`、查询 `stage1 status` 和 `stage1 next`，每轮只展示一个待确认决策。
+`open` 会先校验 Stage1 项目和 Codex CLI，再把固定的 Workspace Agent 协议作为初始任务交给 Codex。Agent 随后自动读取项目 `AGENTS.md`、查询 `stage1 status` 和 `stage1 next`。`next` 返回 `research_required` 时，Workspace Agent 先执行 Research Task；返回 `decision_ready` 时，每轮只展示一个待确认决策。
 
 用户可以直接使用自然语言：
 
 ```text
 继续
 为什么推荐 rv32i？
+研究 https://github.com/example/core 对当前异常边界有什么可复用设计
 我选择 rv32i，因为第一版先控制验证范围
 这项先延期到进入 LSU Design 前
 检查全部架构文档
 我确认批准当前架构
 ```
 
-Workspace Agent 负责把这些回答映射为 `advise`、`answer`、`custom`、`defer`、`review`、`audit` 和 `approve`。Harness 负责提交状态转换和文档更新。推荐、delegated decision 与 Architecture Approval 都保留显式用户确认门禁。
+Workspace Agent 负责把这些回答映射为 `research`、`answer`、`custom`、`defer`、`review`、`audit` 和 `approve`。Harness 负责调研任务、状态转换和文档更新。推荐、delegated decision 与 Architecture Approval 都保留显式用户确认门禁。
 
 直接运行 `codex` 只会启动通用 Codex 会话，Harness 不会自动接收用户输入。Processor Agent 的自然语言入口固定为 `processor-agent open <path>`。
 
@@ -120,17 +122,27 @@ processor-agent open E:\107\my_core --print-prompt
 
 每个 Decision Packet 包含已知事实、候选方案、推荐、后果和影响产物。推荐只代表 Agent 建议，最终结论由用户确认或显式授权。
 
-生成来源化建议：
+每个 Decision 的 `researchPolicy` 取值如下：
+
+1. `required`：展示 Decision 前必须完成充分调研。
+2. `conditional`：用户要求依据、比较、建议或指定来源时调研。
+3. `none`：直接使用项目事实和 Profile，不创建 Research Task。
+
+执行默认 Research Request：
 
 ```powershell
-node dist\src\cli.js stage1 advise E:\107\my_core S1_DEC_001
+node dist\src\cli.js stage1 research E:\107\my_core S1_DEC_001
 ```
 
-同一 Decision 已有有效建议时，`advise` 直接复用 `.assistant/advice/` 中的结果，不重复调用 Codex。需要重新调研时显式刷新：
+指定问题、来源和范围：
 
 ```powershell
-node dist\src\cli.js stage1 advise E:\107\my_core S1_DEC_001 --refresh
+node dist\src\cli.js stage1 research E:\107\my_core S1_DEC_001 --question "比较两个 ISA 范围" --source https://example.com/spec --source E:\107\reference_core --scope "只覆盖第一版 Demo"
 ```
+
+Harness 先启动只读 Research Worker 收集来源和事实，再启动 Synthesis Worker 比较全部候选项。命令输出包含 `source`、`cacheHit`、`fingerprint`、`runId`、两个 Worker thread ID 和 `evidenceSufficient`。相同指纹直接命中缓存。问题、来源、依赖决策、相关文档或 prompt 版本变化时创建新任务。强制重新执行使用 `--refresh`。
+
+`stage1 advise` 保留为默认 Research Request 的兼容入口。新交互统一使用 `stage1 research`。
 
 接受某个候选方案：
 
@@ -213,7 +225,7 @@ node dist\src\cli.js stage1 profile-refresh E:\107\my_core
 node dist\src\cli.js stage1 profile-refresh E:\107\my_core --reset-changed-advice
 ```
 
-该操作会删除对应旧建议和失效的 Research Memo，随后需要重新运行 `stage1 advise`。
+该操作会删除对应旧建议和失效的 Research Memo，随后需要重新运行 `stage1 research`。
 
 用户确认需要用新版 Profile 默认目标和约束替换当前项目意图时，显式执行：
 
@@ -229,6 +241,7 @@ node dist\src\cli.js stage1 profile-refresh E:\107\my_core --adopt-profile-defau
 2. 正式草案被外部编辑时，Harness 停止覆盖并报告具体文件。
 3. 独立审查失败时，先修正 Profile 或用户决策，再重新执行 `review` 和 `audit`。
 4. Smoke check 失败时保留 `BLOCKED` 状态和命令输出，修复环境后重新运行 `complete`。
+5. Research Task 报告 `Codex CLI authentication unavailable` 或 `Codex CLI authentication failed` 时运行 `codex login`，登录成功后重试同一 `stage1 research` 命令。已经启动的失败运行会把原始事件保存在工作区级 `.runtime/processor_agent/`。
 
 当前版本尚未提供批准后的显式 reopen，也未提供命令中断期间的多文件事务自动恢复。遇到这两类情况时，停止手工修改 `.assistant/`，先检查状态文件和正式文档差异。
 
@@ -243,4 +256,4 @@ node dist\src\cli.js stage1 status E:\107\dual_issue_demo
 node dist\src\cli.js stage1 next E:\107\dual_issue_demo
 ```
 
-该项目用于先生成一个保守的顺序双发射 baseline，再从同一冻结 commit 分别运行 Processor Agent 工作流和 Direct Codex 优化实验。
+当前 Profile 为 `0.7.0`，下一动作为 `S1_DEC_007` 的 required Research Task。该项目用于先生成一个保守的顺序双发射 baseline，再从同一冻结 commit 分别运行 Processor Agent 工作流和 Direct Codex 优化实验。

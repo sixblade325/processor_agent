@@ -12,6 +12,7 @@ import type {
   GlobalProtocolSpec,
   ModuleSpec,
   ProjectProfile,
+  ResearchPolicy,
   SharedFieldSpec,
   ScaffoldFileSpec,
 } from "./types.js";
@@ -92,6 +93,7 @@ function validateDecision(value: unknown, label: string): DecisionSpec {
     question: string(item.question, `${label}.question`),
     whyNow: string(item.whyNow, `${label}.whyNow`),
     blocking: boolean(item.blocking, `${label}.blocking`),
+    researchPolicy: validateResearchPolicy(item.researchPolicy, `${label}.researchPolicy`),
     dependsOn: stringArray(item.dependsOn, `${label}.dependsOn`),
     knownFacts: stringArray(item.knownFacts, `${label}.knownFacts`),
     recommendation: string(item.recommendation, `${label}.recommendation`),
@@ -100,6 +102,16 @@ function validateDecision(value: unknown, label: string): DecisionSpec {
       validateOption(option, `${label}.options[${index}]`),
     ),
   };
+}
+
+function validateResearchPolicy(value: unknown, label: string): ResearchPolicy {
+  if (value === undefined) {
+    return "conditional";
+  }
+  if (value !== "required" && value !== "conditional" && value !== "none") {
+    throw new Error(`${label} must be required, conditional, or none`);
+  }
+  return value;
 }
 
 function validateOption(value: unknown, label: string): DecisionOption {

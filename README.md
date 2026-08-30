@@ -11,15 +11,16 @@
 1. 从 Profile 初始化项目并保护已有 `AGENTS.md`、`.gitignore` 和正式文档。
 2. 探测 Windows 控制端和 WSL 构建环境。
 3. 按依赖顺序推进架构决策，记录用户选择、自定义答案和延期项。
-4. 通过 Codex CLI 生成单项来源化建议和独立只读架构审查。
+4. 按 Decision 的 `researchPolicy` 自动创建 Research Task，并通过独立 Research Worker 和 Synthesis Worker 生成来源化建议。
 5. 持续生成 Architecture Overview、Module Manifest、Research Memo 和 Verification Plan。
 6. 使用文档聚合哈希绑定批准，检测批准后的文档漂移。
 7. 根据已批准 Profile 生成项目骨架，并在 WSL 中执行 smoke check。
 8. 在未批准阶段安全更新 Profile，同时保留未变化的用户决策和调研结果。
 9. 通过 `processor-agent open <path>` 启动单一 Workspace Agent，将用户自然语言映射到 Harness 命令。
-10. 缓存每个 Decision 的来源化建议，在回答、修改或延期后继续保留 Research Memo，并支持显式刷新。
+10. 按 Research Request 指纹缓存结果，输出 cache hit、run ID、两个 Worker thread ID 和证据充分性，并支持显式刷新。
+11. 将用户指定的问题、仓库、URL 和范围写入 Research Request，完整 Research Memo 保存在用户项目中。
 
-`dual_issue_demo` Profile 当前版本为 `0.6.2`，用户可读产物默认使用中文。隔离端到端运行已经到达 `STAGE1_COMPLETE`，独立架构审查通过，WSL 中的 `sbt -batch compile` 通过。实际项目 [dual_issue_demo](../dual_issue_demo/) 已进入 `DECISION_LOOP`，当前 Decision 为 `S1_DEC_003`。
+`dual_issue_demo` Profile 当前版本为 `0.7.0`，用户可读产物默认使用中文。隔离端到端运行已经到达 `STAGE1_COMPLETE`，独立架构审查通过，WSL 中的 `sbt -batch compile` 通过。实际项目 [dual_issue_demo](../dual_issue_demo/) 已迁移到 `0.7.0`，当前动作为 `S1_DEC_007` 的 required Research Task。
 
 Stage2、Stage3、本地 Web 工作台、显式架构重开流程和中断中的多文件事务恢复尚未实现。
 
@@ -47,6 +48,8 @@ processor-agent open E:\107\dual_issue_demo
 
 node dist\src\cli.js stage1 status E:\107\dual_issue_demo
 node dist\src\cli.js stage1 next E:\107\dual_issue_demo
+node dist\src\cli.js stage1 research E:\107\dual_issue_demo S1_DEC_007
+node dist\src\cli.js stage1 research E:\107\dual_issue_demo S1_DEC_007 --question "比较异常边界" --source https://example.com/reference --scope "只研究第一版 baseline"
 node dist\src\cli.js stage1 advise E:\107\dual_issue_demo
 node dist\src\cli.js stage1 advise E:\107\dual_issue_demo S1_DEC_001 --refresh
 node dist\src\cli.js stage1 answer E:\107\dual_issue_demo S1_DEC_001 rv32i

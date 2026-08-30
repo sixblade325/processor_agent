@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { parse, stringify } from "yaml";
-import { adviseDecision, buildWorkspaceAgentPrompt } from "../src/agent-runtime.js";
+import {
+  adviseDecision,
+  buildWorkspaceAgentPrompt,
+  researchDecision,
+  type StructuredWorkerExecutor,
+} from "../src/agent-runtime.js";
 import { toWslPath } from "../src/io.js";
 import { loadProfile } from "../src/profile.js";
 import {
@@ -15,6 +20,7 @@ import {
   currentGeneratedAggregate,
   deferDecision,
   findNextDecision,
+  getNextStage1Action,
   initStage1,
   loadStage1,
   probeEnvironment,
@@ -25,7 +31,12 @@ import {
   scaffoldStage1,
   summarizeStage1,
 } from "../src/stage1.js";
-import type { DecisionAdvice, Stage1ProjectState } from "../src/types.js";
+import type {
+  DecisionAdvice,
+  DecisionSynthesis,
+  ResearchEvidence,
+  Stage1ProjectState,
+} from "../src/types.js";
 
 test("Stage1 completes a deterministic profile-driven workflow", async () => {
   const fixture = await createFixture();
@@ -151,6 +162,26 @@ test("Stage1 profile refresh rejects changes to an active decision", async () =>
   );
 });
 
+test("Stage1 profile refresh can add research policy without invalidating an active decision", async () => {
+  const fixture = await createFixture();
+  await initStage1(fixture.project, fixture.profile);
+  await answerDecision(fixture.project, "D1", "a");
+
+  const policyProfile = join(fixture.root, "profile-policy.yaml");
+  await writeFile(
+    policyProfile,
+    fixtureProfile()
+      .replace("version: 1.0.0", "version: 2.0.0")
+      .replace("researchPolicy: conditional", "researchPolicy: required"),
+    "utf8",
+  );
+  const loaded = await refreshStage1Profile(fixture.project, policyProfile);
+
+  assert.equal(loaded.state.project.profile.version, "2.0.0");
+  assert.equal(loaded.state.stage1.decisions.D1?.selectedOption, "a");
+  assert.equal(loaded.loadedProfile.profile.decisions[0]?.researchPolicy, "required");
+});
+
 test("Stage1 can discard stale pending advice during an explicit profile migration", async () => {
   const fixture = await createFixture();
   await initStage1(fixture.project, fixture.profile);
@@ -229,7 +260,11 @@ test("Stage1 prohibits document-changing operations after approval", async () =>
 
 test("Dual-issue production profile passes structural validation", async () => {
   const loaded = await loadProfile("dual_issue_demo");
-  assert.equal(loaded.profile.version, "0.6.2");
+  assert.equal(loaded.profile.version, "0.7.0");
+  assert.deepEqual(
+    loaded.profile.decisions.map((decision) => decision.researchPolicy),
+    ["required", "none", "required", "conditional", "conditional", "required", "required", "required"],
+  );
   assert.ok(loaded.profile.architecture.globalProtocols.length >= 8);
   assert.ok(loaded.profile.architecture.modules.some((module) => module.id === "issue"));
   assert.equal(loaded.profile.verification.decisionAcceptance.length, 8);
@@ -263,6 +298,9 @@ test("Workspace Agent prompt routes natural language through the Harness", async
   assert.match(prompt, /processor-agent stage1 status \. --json/u);
   assert.match(prompt, /processor-agent stage1 next \. --json/u);
   assert.match(prompt, /processor-agent stage1 answer \. <decision-id> <option-id>/u);
+  assert.match(prompt, /processor-agent stage1 research \. <decision-id>/u);
+  assert.match(prompt, /影响正式决策的来源调研不得由 Workspace Agent 在主上下文中直接完成/u);
+  assert.match(prompt, /nextAction=decision_ready/u);
   assert.match(prompt, /不得手工修改 `\.assistant\/`/u);
   assert.match(prompt, /不得一次要求用户确认多个架构决策/u);
   assert.match(prompt, /不得.*再次调用 `processor-agent open`/u);
@@ -319,6 +357,137 @@ test("Advise reattaches valid orphan advice without invoking Codex", async () =>
   assert.equal(loaded.state.stage1.history.at(-1)?.event, "DECISION_ADVICE_RECORDED");
 });
 
+test("Required research blocks a Decision until sufficient evidence is recorded", async () => {
+  const fixture = await createFixture();
+  await writeFile(
+    fixture.profile,
+    fixtureProfile().replace("researchPolicy: conditional", "researchPolicy: required"),
+    "utf8",
+  );
+  const initialized = await initStage1(fixture.project, fixture.profile);
+  assert.equal(getNextStage1Action(initialized.state, initialized.loadedProfile.profile)?.kind, "research_required");
+  await assert.rejects(answerDecision(fixture.project, "D1", "a"), /requires current sufficient research/u);
+
+  const tasks: string[] = [];
+  await researchDecision(
+    fixture.project,
+    "D1",
+    { executor: fixtureResearchExecutor(tasks, false) },
+  );
+  let loaded = await loadStage1(fixture.project);
+  assert.equal(getNextStage1Action(loaded.state, loaded.loadedProfile.profile)?.kind, "research_required");
+  await assert.rejects(answerDecision(fixture.project, "D1", "a"), /requires current sufficient research/u);
+
+  await researchDecision(
+    fixture.project,
+    "D1",
+    { refresh: true, executor: fixtureResearchExecutor(tasks, true) },
+  );
+  loaded = await loadStage1(fixture.project);
+  assert.equal(getNextStage1Action(loaded.state, loaded.loadedProfile.profile)?.kind, "decision_ready");
+  await answerDecision(fixture.project, "D1", "a");
+  assert.deepEqual(tasks, ["research", "synthesis", "research", "synthesis"]);
+});
+
+test("Research policy none keeps a Decision ready and rejects a Research Task", async () => {
+  const fixture = await createFixture();
+  await writeFile(
+    fixture.profile,
+    fixtureProfile().replace("researchPolicy: conditional", "researchPolicy: none"),
+    "utf8",
+  );
+  const initialized = await initStage1(fixture.project, fixture.profile);
+  assert.equal(getNextStage1Action(initialized.state, initialized.loadedProfile.profile)?.kind, "decision_ready");
+  await assert.rejects(
+    researchDecision(fixture.project, "D1", { executor: fixtureResearchExecutor([], true) }),
+    /researchPolicy=none/u,
+  );
+  await answerDecision(fixture.project, "D1", "a");
+});
+
+test("Research Task uses isolated evidence and synthesis workers with fingerprint cache", async () => {
+  const fixture = await createFixture();
+  await initStage1(fixture.project, fixture.profile);
+  const tasks: string[] = [];
+  const request = {
+    question: "比较两个候选方案。",
+    sources: ["https://example.com/core"],
+    scope: "只检查发射路径。",
+  };
+  const first = await researchDecision(
+    fixture.project,
+    "D1",
+    { request, executor: fixtureResearchExecutor(tasks, true) },
+  );
+
+  assert.equal(first.source, "worker");
+  assert.equal(first.cacheHit, false);
+  assert.equal(first.researchThreadId, "research-thread");
+  assert.equal(first.synthesisThreadId, "synthesis-thread");
+  assert.deepEqual(tasks, ["research", "synthesis"]);
+  const loaded = await loadStage1(fixture.project);
+  assert.equal(loaded.state.stage1.decisions.D1?.research?.fingerprint, first.fingerprint);
+  assert.equal(loaded.state.stage1.decisions.D1?.research?.evidenceSufficient, true);
+
+  const memo = await readFile(join(fixture.project, "research", "stage1.md"), "utf8");
+  assert.match(memo, /Research Request：比较两个候选方案/u);
+  assert.match(memo, /https:\/\/example\.com\/core/u);
+  assert.match(memo, /Research Worker：`research-thread`/u);
+  assert.match(memo, /成本：增加组合路径/u);
+
+  const runtimeParent = join(
+    fixture.root,
+    ".runtime",
+    "processor_agent",
+    "project",
+    "stage1",
+    "D1",
+  );
+  const runs = await readdir(runtimeParent);
+  assert.equal(runs.length, 1);
+  assert.deepEqual(
+    (await readdir(join(runtimeParent, runs[0] ?? ""))).sort(),
+    [
+      "evidence.json",
+      "request.json",
+      "research.codex.jsonl",
+      "research.schema.json",
+      "synthesis.codex.jsonl",
+      "synthesis.json",
+      "synthesis.schema.json",
+    ],
+  );
+
+  const cached = await researchDecision(
+    fixture.project,
+    "D1",
+    { request, executor: fixtureResearchExecutor(tasks, true) },
+  );
+  assert.equal(cached.source, "cache");
+  assert.equal(cached.cacheHit, true);
+  assert.equal(cached.runId, first.runId);
+  assert.deepEqual(tasks, ["research", "synthesis"]);
+  assert.equal((await readdir(runtimeParent)).length, 1);
+});
+
+test("Legacy advice satisfies a required research gate during profile migration", async () => {
+  const fixture = await createFixture();
+  await writeFile(
+    fixture.profile,
+    fixtureProfile().replace("researchPolicy: conditional", "researchPolicy: required"),
+    "utf8",
+  );
+  await initStage1(fixture.project, fixture.profile);
+  await saveDecisionAdvice(
+    fixture.project,
+    "D1",
+    `${JSON.stringify(adviceFixture("D1", "a"), null, 2)}\n`,
+  );
+  const loaded = await loadStage1(fixture.project);
+  assert.equal(getNextStage1Action(loaded.state, loaded.loadedProfile.profile)?.kind, "decision_ready");
+  await answerDecision(fixture.project, "D1", "a");
+});
+
 async function createFixture(): Promise<{ root: string; project: string; profile: string }> {
   const root = await mkdtemp(join(tmpdir(), "processor-agent-stage1-"));
   const project = resolve(root, "project");
@@ -347,6 +516,7 @@ decisions:
     question: Select the first option.
     whyNow: It gates the second decision.
     blocking: true
+    researchPolicy: conditional
     dependsOn: []
     knownFacts: [fact]
     recommendation: a
@@ -365,6 +535,7 @@ decisions:
     question: Select the second option.
     whyNow: It closes the test architecture.
     blocking: true
+    researchPolicy: conditional
     dependsOn: [D1]
     knownFacts: [fact]
     recommendation: b
@@ -430,6 +601,53 @@ function adviceFixture(decisionId: string, recommendation: "a" | "b"): DecisionA
     recommendation,
     rationale: ["Fixture rationale"],
     openQuestions: [],
+  };
+}
+
+function fixtureResearchExecutor(
+  tasks: string[],
+  evidenceSufficient: boolean,
+): StructuredWorkerExecutor {
+  return async ({ task }) => {
+    tasks.push(task);
+    if (task === "research") {
+      const evidence: ResearchEvidence = {
+        decisionId: "D1",
+        sources: [
+          {
+            kind: "url",
+            locator: "https://example.com/core",
+            revision: "example-revision",
+            accessedAt: "2026-08-30T00:00:00.000Z",
+            locations: ["Issue path"],
+          },
+        ],
+        facts: [
+          {
+            claim: "方案 a 的发射路径更短。",
+            source: "https://example.com/core#issue",
+            confidence: "high",
+          },
+        ],
+        conflicts: [],
+        gaps: evidenceSufficient ? [] : ["缺少完整时序数据。"],
+        evidenceSufficient,
+        stopReason: evidenceSufficient ? "关键事实已经覆盖。" : "缺少可访问的时序报告。",
+      };
+      return { output: evidence, threadId: "research-thread" };
+    }
+    const synthesis: DecisionSynthesis = {
+      decisionId: "D1",
+      summary: "基于已核验证据比较两个候选项。",
+      optionAnalysis: [
+        { optionId: "a", benefits: ["发射路径更短"], costs: ["增加组合路径"], risks: [] },
+        { optionId: "b", benefits: [], costs: [], risks: ["性能收益较低"] },
+      ],
+      recommendation: "a",
+      rationale: ["现有证据支持 a。"],
+      openQuestions: evidenceSufficient ? [] : ["需要补充时序报告。"],
+    };
+    return { output: synthesis, threadId: "synthesis-thread" };
   };
 }
 

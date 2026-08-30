@@ -15,6 +15,8 @@ export type Stage1Status =
 
 export type DecisionStatus = "pending" | "answered" | "deferred" | "delegated";
 
+export type ResearchPolicy = "required" | "conditional" | "none";
+
 export type RunnerKind = "host" | "wsl";
 
 export interface CommandSpec {
@@ -40,6 +42,7 @@ export interface DecisionSpec {
   question: string;
   whyNow: string;
   blocking: boolean;
+  researchPolicy: ResearchPolicy;
   dependsOn: string[];
   knownFacts: string[];
   recommendation: string;
@@ -149,14 +152,40 @@ export interface CommandResult {
   checkedAt: string;
 }
 
-export interface DecisionAdvice {
+export interface ResearchRequest {
+  decisionId: string;
+  question: string;
+  sources: string[];
+  scope?: string;
+}
+
+export interface ResearchSourceEvidence {
+  kind: "project" | "url" | "repository" | "paper" | "other";
+  locator: string;
+  revision: string;
+  accessedAt: string;
+  locations: string[];
+}
+
+export interface ResearchFact {
+  claim: string;
+  source: string;
+  confidence: "low" | "medium" | "high";
+}
+
+export interface ResearchEvidence {
+  decisionId: string;
+  sources: ResearchSourceEvidence[];
+  facts: ResearchFact[];
+  conflicts: string[];
+  gaps: string[];
+  evidenceSufficient: boolean;
+  stopReason: string;
+}
+
+export interface DecisionSynthesis {
   decisionId: string;
   summary: string;
-  facts: Array<{
-    claim: string;
-    source: string;
-    confidence: "low" | "medium" | "high";
-  }>;
   optionAnalysis: Array<{
     optionId: string;
     benefits: string[];
@@ -168,6 +197,48 @@ export interface DecisionAdvice {
   openQuestions: string[];
 }
 
+export interface DecisionAdvice extends DecisionSynthesis {
+  schemaVersion?: number;
+  facts: ResearchFact[];
+  research?: {
+    request: ResearchRequest;
+    fingerprint: string;
+    contextFingerprint: string;
+    evidence: ResearchEvidence;
+    completedAt: string;
+    runId: string;
+    source: "worker" | "legacy";
+    researchThreadId?: string;
+    synthesisThreadId?: string;
+  };
+}
+
+export interface DecisionResearchState {
+  status: "complete";
+  request: ResearchRequest;
+  fingerprint: string;
+  contextFingerprint: string;
+  evidenceSufficient: boolean;
+  completedAt: string;
+  runId: string;
+  source: "worker" | "legacy";
+  researchThreadId?: string;
+  synthesisThreadId?: string;
+}
+
+export interface ResearchExecutionResult {
+  source: "worker" | "cache" | "legacy_cache";
+  cacheHit: boolean;
+  decisionId: string;
+  fingerprint: string;
+  contextFingerprint: string;
+  runId: string;
+  evidenceSufficient: boolean;
+  researchThreadId?: string;
+  synthesisThreadId?: string;
+  advice: DecisionAdvice;
+}
+
 export interface DecisionState {
   status: DecisionStatus;
   selectedOption?: string;
@@ -176,6 +247,7 @@ export interface DecisionState {
   deferredUntil?: string;
   answeredAt?: string;
   advicePath?: string;
+  research?: DecisionResearchState;
 }
 
 export interface ApprovalRecord {
@@ -267,6 +339,19 @@ export interface Stage1Summary {
   pending: number;
   deferred: number;
   nextDecision?: DecisionSpec;
+  nextAction?: Stage1NextAction;
   blockers: string[];
   approvalCurrent: boolean;
 }
+
+export type Stage1NextAction =
+  | {
+      kind: "research_required";
+      decision: DecisionSpec;
+      request: ResearchRequest;
+      fingerprint: string;
+    }
+  | {
+      kind: "decision_ready";
+      decision: DecisionSpec;
+    };

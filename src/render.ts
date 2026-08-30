@@ -41,6 +41,7 @@ export function renderDecisionPacket(
     decision.question,
     "",
     `为什么现在决定：${decision.whyNow}`,
+    `调研策略：${decision.researchPolicy}`,
     "",
     "已知事实：",
     ...decision.knownFacts.map((fact) => `- ${fact}`),
@@ -345,18 +346,96 @@ async function renderResearchMemo(
     lines.push("");
     lines.push(advice.summary);
     lines.push("");
-    lines.push("事实：");
+    lines.push(`- 调研策略：${decision.researchPolicy}`);
+    if (advice.research === undefined) {
+      lines.push("- 证据格式：legacy advice");
+    } else {
+      lines.push(`- Research Request：${advice.research.request.question}`);
+      if (advice.research.request.scope !== undefined) {
+        lines.push(`- 调研范围：${advice.research.request.scope}`);
+      }
+      lines.push(`- Fingerprint：\`${advice.research.fingerprint}\``);
+      lines.push(`- Run：\`${advice.research.runId}\``);
+      lines.push(`- 完成时间：${advice.research.completedAt}`);
+      lines.push(`- 证据充分：${advice.research.evidence.evidenceSufficient ? "是" : "否"}`);
+      if (advice.research.researchThreadId !== undefined) {
+        lines.push(`- Research Worker：\`${advice.research.researchThreadId}\``);
+      }
+      if (advice.research.synthesisThreadId !== undefined) {
+        lines.push(`- Synthesis Worker：\`${advice.research.synthesisThreadId}\``);
+      }
+      lines.push(`- 停止原因：${advice.research.evidence.stopReason}`);
+      lines.push("");
+      lines.push("### 来源");
+      lines.push("");
+      if (advice.research.evidence.sources.length === 0) {
+        lines.push("- 无可用来源。");
+      }
+      for (const source of advice.research.evidence.sources) {
+        lines.push(
+          `- [${source.kind}] ${source.locator}，revision：${source.revision}，访问时间：${source.accessedAt}`,
+        );
+        lines.push(...source.locations.map((location) => `  - 位置：${location}`));
+      }
+    }
+    lines.push("");
+    lines.push("### 已核验事实");
+    lines.push("");
+    if (advice.facts.length === 0) {
+      lines.push("- 无。");
+    }
     for (const fact of advice.facts) {
       lines.push(`- ${fact.claim} 来源：${fact.source}。置信度：${confidenceLabel(fact.confidence)}。`);
     }
+    if (advice.research !== undefined) {
+      lines.push("");
+      lines.push("### 冲突与缺口");
+      lines.push("");
+      if (
+        advice.research.evidence.conflicts.length === 0
+        && advice.research.evidence.gaps.length === 0
+      ) {
+        lines.push("- 无。");
+      }
+      lines.push(...advice.research.evidence.conflicts.map((item) => `- 冲突：${item}`));
+      lines.push(...advice.research.evidence.gaps.map((item) => `- 缺口：${item}`));
+    }
     lines.push("");
-    lines.push(`推荐：${advice.recommendation}`);
+    lines.push("### 候选项比较");
     lines.push("");
-    lines.push(...advice.rationale.map((item) => `- ${item}`));
+    for (const item of advice.optionAnalysis) {
+      const option = decision.options.find((candidate) => candidate.id === item.optionId);
+      lines.push(`#### ${item.optionId}: ${option?.label ?? item.optionId}`);
+      lines.push("");
+      lines.push(`- 收益：${item.benefits.length === 0 ? "无已确认收益" : item.benefits.join("；")}`);
+      lines.push(`- 成本：${item.costs.length === 0 ? "无已确认成本" : item.costs.join("；")}`);
+      lines.push(`- 风险：${item.risks.length === 0 ? "无已确认风险" : item.risks.join("；")}`);
+      lines.push("");
+    }
+    lines.push("### 综合建议");
+    lines.push("");
+    lines.push(`- 推荐：${advice.recommendation}`);
+    lines.push(...advice.rationale.map((item) => `- 理由：${item}`));
     if (advice.openQuestions.length > 0) {
       lines.push("");
       lines.push("待确认问题：");
       lines.push(...advice.openQuestions.map((item) => `- ${item}`));
+    }
+    const decisionState = state.stage1.decisions[decision.id];
+    lines.push("");
+    lines.push("### 用户结论");
+    lines.push("");
+    lines.push(`- 状态：${decisionState?.status ?? "missing"}`);
+    const selected = selectedOption(decision, state);
+    if (selected !== undefined) {
+      lines.push(`- 结论：${selected.id}，${selected.label}`);
+    } else if (decisionState?.customAnswer !== undefined) {
+      lines.push(`- 结论：${decisionState.customAnswer}`);
+    } else {
+      lines.push("- 结论：待用户确认");
+    }
+    if (decisionState?.note !== undefined) {
+      lines.push(`- 说明：${decisionState.note}`);
     }
     lines.push("");
   }

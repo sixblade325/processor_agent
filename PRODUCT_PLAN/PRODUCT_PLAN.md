@@ -206,7 +206,7 @@ Change Engine 管理状态转换、审批哈希、版本漂移和重开流程。
 
 ### 4.4 Agent Runtime Adapter
 
-Agent Runtime Adapter 隔离具体 Coding Agent。第一版实现 `CodexCliRuntime`。来源化建议和独立审查通过非交互 `codex exec` 执行，并保留以下稳定操作：
+Agent Runtime Adapter 隔离具体 Coding Agent。第一版实现 `CodexCliRuntime`。Decision 级 Research Task 和独立审查通过非交互 `codex exec` 执行，并保留以下稳定操作：
 
 ```text
 prepare
@@ -216,7 +216,7 @@ cancel
 capabilities
 ```
 
-每次 Agent 运行使用独立上下文，并接收结构化任务包。
+每次 Agent 运行使用独立上下文，并接收结构化任务包。Research Task 依次启动只读 Research Worker 和只读 Synthesis Worker，前者输出来源与事实 Evidence，后者只基于 Evidence 比较候选项。
 
 新 Agent 必须能够仅依靠任务包和项目文件继续工作。Harness 不转发上一 Agent 的私有对话历史。
 
@@ -299,7 +299,7 @@ gates
 
 ## 6. Agent 模型
 
-用户始终面对一个 Workspace Agent。第一版内部使用两个独立 Agent 上下文：
+用户始终面对一个 Workspace Agent。Design Agent 和 Implementation Agent 是跨阶段的两个主要职责。Stage1 Research Task 额外使用两个短生命周期 Worker，不形成新的持久角色。
 
 ### 6.1 Design Agent
 
@@ -420,6 +420,7 @@ processor-agent open <path>
 processor-agent stage1 init <path>
 processor-agent stage1 status <path>
 processor-agent stage1 next <path>
+processor-agent stage1 research <path> [decision-id]
 processor-agent stage1 advise <path>
 processor-agent stage1 answer <path> <decision-id> <option-id>
 processor-agent stage1 custom <path> <decision-id>
@@ -601,6 +602,7 @@ Product 与 Direct Codex 从同一个冻结 commit 开始。Product 使用完整
 7. `dual_issue_demo` 采用 Windows Control Plane 和 WSL Execution Runner，当前只支持盘符路径到 `/mnt/<drive>/` 的转换。
 8. Chisel 项目骨架固定 Scala `2.13.18`、Chisel `7.14.0` 和 SBT `1.12.11`。
 9. 用户项目默认生成中文 Architecture、Research、Verification 和严格版 `AGENTS.md`。
+10. Stage1 Decision 声明 `researchPolicy`。Research Request、指纹、Evidence、run ID、Worker thread ID 和证据充分性由 Harness 落盘。
 
 剩余实现选择：
 

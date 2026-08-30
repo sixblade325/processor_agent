@@ -1,6 +1,6 @@
 schemaVersion: 1
 id: dual_issue_demo
-version: 0.6.2
+version: 0.7.0
 displayName: 顺序双发射演示核
 description: 一个规模受控、具有明确优化空间的顺序双发射 Chisel 处理器。
 
@@ -53,6 +53,7 @@ decisions:
     question: baseline 实现哪个 ISA 子集？
     whyNow: Decoder、架构状态、参考模型、测试和指令编码均依赖此选择。
     blocking: true
+    researchPolicy: required
     dependsOn: []
     knownFacts:
       - 当前 WSL 环境没有外部 RISC-V 编译器和 Spike 可执行文件。
@@ -82,6 +83,7 @@ decisions:
     question: Chisel 构建和仿真在哪个环境运行？
     whyNow: 项目命令、路径转换、环境证据和恢复方式依赖统一的执行边界。
     blocking: true
+    researchPolicy: none
     dependsOn: []
     knownFacts:
       - Windows 已安装 Node.js 和已登录的 Codex CLI。
@@ -109,6 +111,7 @@ decisions:
     question: baseline 采用哪组流水级边界？
     whyNow: Forwarding、冒险检测、分支恢复、模块边界和测试时序均依赖流水级划分。
     blocking: true
+    researchPolicy: required
     dependsOn: [S1_DEC_001]
     knownFacts:
       - 优化演示需要显式观察同周期发射的两条 ALU 指令之间的关系。
@@ -136,6 +139,7 @@ decisions:
     question: 两条发射 Lane 分别允许执行哪些操作？
     whyNow: 配对合法性、结构冲突、结果选择和模块端口均依赖 Lane 能力。
     blocking: true
+    researchPolicy: conditional
     dependsOn: [S1_DEC_003]
     knownFacts:
       - Lane 0 始终比 Lane 1 年老。
@@ -164,6 +168,7 @@ decisions:
     question: baseline 如何处理 Lane 0 生产、Lane 1 消费的同拍 RAW？
     whyNow: 该规则定义优化空间和第一个 Architecture Change。
     blocking: true
+    researchPolicy: conditional
     dependsOn: [S1_DEC_004]
     knownFacts:
       - 跨周期 forwarding 保持可用。
@@ -192,6 +197,7 @@ decisions:
     question: baseline 采用哪些访存和控制流限制？
     whyNow: 结构冲突、flush、backpressure 和外部接口均依赖这些限制。
     blocking: true
+    researchPolicy: required
     dependsOn: [S1_DEC_003]
     knownFacts:
       - Demo 不需要 Cache 和虚拟内存。
@@ -219,6 +225,7 @@ decisions:
     question: 第一版 baseline 精确处理哪些异常条件？
     whyNow: Flush、退休、副作用抑制和参考模型均依赖异常边界。
     blocking: true
+    researchPolicy: required
     dependsOn: [S1_DEC_001, S1_DEC_006]
     knownFacts:
       - 完整特权架构不属于第一版 Demo。
@@ -245,6 +252,7 @@ decisions:
     question: 哪种参考模型和 workload 策略作为 baseline 门禁？
     whyNow: Stage2 模块测试、集成完成、计数器和优化对照需要统一验收契约。
     blocking: true
+    researchPolicy: required
     dependsOn: [S1_DEC_001, S1_DEC_005, S1_DEC_006, S1_DEC_007]
     knownFacts:
       - 当前 WSL 没有外部 RISC-V 编译器和 Spike 可执行文件。
