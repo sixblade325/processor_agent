@@ -20,19 +20,24 @@
 10. 按 Research Request 指纹缓存结果，输出 cache hit、run ID、两个 Worker thread ID 和证据充分性，并支持显式刷新。
 11. 将用户指定的问题、仓库、URL 和范围写入 Research Request，完整 Research Memo 保存在用户项目中。
 12. 通过 `stage1 reopen` 修正未批准的已关闭 Decision。Harness 保留此前结论作为修订基线，使旧 advice 与全部传递依赖 Decision 失效，并生成可确认的完整修订候选。
-13. 通过只读 Project Reader MCP 向 Research Worker 提供受限的项目文件枚举、文本搜索和分段读取能力。
-14. 将 Architecture audit finding 分类为 `decision`、`project_spec` 或 `profile`，通过 `stage1 correct` 修正结构化项目事实，保留旧 audit，并强制重新 `review` 和 `audit`。
-15. 通过 `stage2 init` 从已批准且未漂移的 Architecture Snapshot 建立按模块推进的 `Design -> Implementation -> Verification` 状态机。
-16. 维护两个可恢复 Codex 模块上下文、角色、租约与 state epoch，在 Shadow Align 和 Active Coding 之间按门禁轮转。
-17. 将 Shadow Design 投影为中文 `design/<module>.md`，允许未闭合 Design 落盘，以 `design_revision` 显示缺口，并在用户批准前强制检查未决问题、实现路径、测试路径和验收命令。
-18. 将 Active Coding 的结构化全文件结果限制在批准路径内，校验 Design 哈希和原文件哈希后再由 Harness 写入。
-19. 按模块要求用户选择 `independent_workers` 或 `active_only`，记录主验证、静态审查、最终验证和独立性证据。
-20. 支持显式 Design reopen、实现阶段带反例自动 reopen、共享接口影响失效和双 Agent 原子轮转。
-21. 从仓库 `skills/` 加载 Design 与 Implementation 领域方法，将正文注入对应任务，并在正式记录与 Task Envelope 中保存 Skill 内容哈希。
+13. 通过只读 Project Reader MCP 向 Research Worker 和 Stage2 Worker 提供受限的项目文件枚举、文本搜索和分段读取能力。
+14. 将 Architecture audit finding 分类为 `decision`、`project_spec` 或 `profile`。Review Correction v2 使用领域增量事件、独立 Evidence 覆盖和用户确认修正结构化项目事实，并强制重新 `review` 和 `audit`。
+15. 通过 `stage2 init` 从已批准且未漂移的 Architecture Snapshot 建立 Implementation Topology Decision Loop，不直接消费 `architecture.stage2Order`。
+16. 由独立 Topology Research Worker 收集证据，可恢复 Planner 每次只形成一个 Decision Packet。
+17. 支持 Topology option、custom、reopen 和传递失效，将已确认内容持续投影到唯一 `design/plan.md`。
+18. 在 Plan 批准前检查 Architecture Module 唯一映射、Interface owner、路径 owner、Unit DAG、wave 和完成条件，并显示完整 Unit 看板。
+19. 显式迁移尚无批准 Design、源码和验证证据的 schemaVersion 1 Module Loop，拒绝自动迁移已物化的旧状态。
+20. 维护两个可恢复 Codex 上下文、角色、租约与 state epoch，Plan 批准后按 Unit DAG 在 Shadow Align 和 Active Coding 之间轮转。
+21. 将 Shadow Design 投影为中文 `design/<unit>.md`，以 `design_revision` 显示缺口，并强制检查 Plan 路径、未决问题和验收命令。
+22. 将 Active Coding 的结构化全文件结果限制在批准路径内，校验 Plan、Design 和原文件哈希后再由 Harness 写入。
+23. 按 Unit 要求用户选择 `independent_workers` 或 `active_only`，记录主验证、静态审查、最终验证和独立性证据。
+24. 从仓库 `skills/` 加载 Topology、Design 与 Implementation 领域方法，在正式记录与 Task Envelope 中保存 Skill 内容哈希。
+25. 将 ProjectSpec 基线和增量历史压缩到内容寻址 sidecar，`.assistant/project.yaml` 只保存当前事实、Correction 索引和 sidecar 元数据。旧 v1 项目通过显式 dry-run 与 apply 迁移。
+26. Stage2 发现已批准 Architecture 错误时，通过 `rework-start` 冻结 Stage2、返回 Stage1 修正并重新批准，再通过 `rework-resume` 失效受影响的 Topology Decision、Unit Design、Implementation 和 Verification。
 
 `dual_issue_demo` Profile 当前版本为 `0.7.0`，用户可读产物默认使用中文。隔离端到端运行已经到达 `STAGE1_COMPLETE`，独立架构审查通过，WSL 中的 `sbt -batch compile` 通过。实际项目 [dual_issue_demo](../dual_issue_demo/) 已迁移到 `0.7.0`，当前动作以该项目的 Harness 状态为准。
 
-Stage2 Module Development Loop 已实现。Stage3、本地 Web 工作台、批准后的 Architecture reopen 和中断中的多文件事务恢复尚未实现。实际 `dual_issue_demo` 需先完成当前 Stage1 审查修正，才能初始化 Stage2。
+Stage2 Implementation Topology Decision Loop、Unit Module Loop 和 Stage2 到 Stage1 Architecture Rework 已实现，55 项自动测试全部通过。`dual_issue_demo` 已进入 `TOPOLOGY_DECISION_LOOP`，首个 `S2_TOP_001` 已由独立 Research Worker 和可恢复 Planner 形成三个候选，当前等待用户确认。项目尚无已确认 Unit、Unit Design 或 RTL。Stage3、本地 Web 工作台和中断中的多文件事务自动恢复尚未实现。
 
 ## 运行要求
 
@@ -61,7 +66,9 @@ node dist\src\cli.js stage1 next E:\107\dual_issue_demo
 node dist\src\cli.js stage1 research E:\107\dual_issue_demo S1_DEC_007
 node dist\src\cli.js stage1 research E:\107\dual_issue_demo S1_DEC_007 --question "比较异常边界" --source https://example.com/reference --scope "只研究第一版 baseline"
 node dist\src\cli.js stage1 reopen E:\107\dual_issue_demo S1_DEC_003 --reason "修正流水级边界"
-node dist\src\cli.js stage1 correct E:\107\dual_issue_demo STAGE2_ORDER_INCOMPLETE --patch-json '{"architecture":{"stage2Order":["frontend","core"]}}' --reason "补齐实施顺序" --source "architecture/overview.md"
+node dist\src\cli.js stage1 correct E:\107\dual_issue_demo STAGE2_ORDER_INCOMPLETE --proposal-json '{"patch":{"architecture":{"stage2Order":["frontend","core"]}},"rationale":"补齐确定性模块顺序","evidenceSources":[{"id":"EV_USER","kind":"user_directive","locator":"STAGE2_ORDER_INCOMPLETE","claim":"用户确认 frontend 位于 core 之前，并要求写入项目事实。","locations":[]}],"evidenceCoverage":{"architecture.stage2Order":["EV_USER"]}}'
+node dist\src\cli.js stage1 correction-migrate E:\107\dual_issue_demo --dry-run
+node dist\src\cli.js stage1 release-override E:\107\dual_issue_demo architecture.stage2Order
 node dist\src\cli.js stage1 advise E:\107\dual_issue_demo
 node dist\src\cli.js stage1 advise E:\107\dual_issue_demo S1_DEC_001 --refresh
 node dist\src\cli.js stage1 answer E:\107\dual_issue_demo S1_DEC_001 rv32i
@@ -69,10 +76,18 @@ node dist\src\cli.js stage1 answer E:\107\dual_issue_demo S1_DEC_001 rv32i
 node dist\src\cli.js stage2 init E:\107\dual_issue_demo
 node dist\src\cli.js stage2 status E:\107\dual_issue_demo
 node dist\src\cli.js stage2 next E:\107\dual_issue_demo
+node dist\src\cli.js stage2 plan E:\107\dual_issue_demo S2_TOP_001 --instruction "优先检查状态 owner 和既定寄存边界"
+node dist\src\cli.js stage2 plan E:\107\dual_issue_demo S2_TOP_001 --instruction "重新核对现有源码边界" --refresh
+node dist\src\cli.js stage2 answer E:\107\dual_issue_demo S2_TOP_001 recommended
+node dist\src\cli.js stage2 topology-reopen E:\107\dual_issue_demo S2_TOP_001 --reason "Unit 边界需要修正"
+node dist\src\cli.js stage2 review E:\107\dual_issue_demo
+node dist\src\cli.js stage2 approve-plan E:\107\dual_issue_demo
 node dist\src\cli.js stage2 design E:\107\dual_issue_demo regfile
 node dist\src\cli.js stage2 approve E:\107\dual_issue_demo regfile --verification-mode independent_workers
 node dist\src\cli.js stage2 implement E:\107\dual_issue_demo regfile
 node dist\src\cli.js stage2 verify E:\107\dual_issue_demo regfile
+node dist\src\cli.js stage2 rework-start E:\107\dual_issue_demo --proposal-json '{"summary":"Stage2 发现已批准 Architecture 缺少寄存器文件同拍语义。","rationale":"Unit Design 无法在现有 Contract 下闭合。","source":{"kind":"unit_design","unitId":"regfile"},"repair":{"kind":"decision","target":"S1_DEC_003"},"requiredClosure":["补齐同拍读写语义"],"evidenceSources":[{"id":"EV_USER","kind":"user_directive","locator":"S2_REWORK","claim":"用户确认该缺口属于 Stage1 Architecture，并要求正式返工。","locations":[]}],"affectedTopologyDecisions":["S2_TOP_001"],"affectedUnits":["regfile"]}'
+node dist\src\cli.js stage2 rework-resume E:\107\dual_issue_demo
 ```
 
 创建新项目：

@@ -18,24 +18,40 @@ import {
   getNextStage1Action,
   initStage1,
   loadStage1,
+  migrateReviewCorrectionsV2,
   probeEnvironment,
   refreshStage1Profile,
+  releaseProjectSpecOverride,
   reopenDecision,
   reviewStage1,
   scaffoldStage1,
   summarizeStage1,
+  type ReviewCorrectionProposal,
 } from "./stage1.js";
 import {
+  answerTopologyCustom,
+  answerTopologyDecision,
   approveModuleDesign,
+  approveTopologyPlan,
   initStage2,
   loadStage2,
+  migrateLegacyStage2,
   reopenModuleDesign,
+  reopenTopologyDecision,
+  reviewTopologyPlan,
   runActiveImplementation,
   runModuleVerification,
   runShadowDesign,
+  runTopologyPlanning,
+  startStage2ArchitectureRework,
+  resumeStage2ArchitectureRework,
   summarizeStage2,
 } from "./stage2.js";
-import type { Stage2NextAction, Stage2VerificationMode } from "./types.js";
+import type {
+  Stage2ArchitectureReworkProposal,
+  Stage2NextAction,
+  Stage2VerificationMode,
+} from "./types.js";
 
 interface ParsedArguments {
   positional: string[];
@@ -90,6 +106,12 @@ async function main(): Promise<void> {
     case "correct":
       await commandCorrect(args);
       break;
+    case "correction-migrate":
+      await commandCorrectionMigrate(args);
+      break;
+    case "release-override":
+      await commandReleaseOverride(args);
+      break;
     case "probe":
       await commandProbe(args);
       break;
@@ -129,6 +151,11 @@ async function commandStage2(command: string, args: ParsedArguments): Promise<vo
       printStage2Summary(await summarizeStage2(loaded));
       break;
     }
+    case "migrate": {
+      const loaded = await migrateLegacyStage2(requirePositional(args, 0, "project path"));
+      printStage2Summary(await summarizeStage2(loaded));
+      break;
+    }
     case "status": {
       const loaded = await loadStage2(requirePositional(args, 0, "project path"));
       const summary = await summarizeStage2(loaded);
@@ -147,6 +174,84 @@ async function commandStage2(command: string, args: ParsedArguments): Promise<vo
       } else {
         printStage2Actions(actions);
       }
+      break;
+    }
+    case "plan": {
+      assertOnlyOptions(args, ["instruction", "refresh"]);
+      const result = await runTopologyPlanning(
+        requirePositional(args, 0, "project path"),
+        args.positional[1],
+        option(args, "instruction"),
+        { refreshResearch: flag(args, "refresh") },
+      );
+      process.stdout.write(
+        `Topology proposal drafted: ${result.output.decisionId}\nrunId: ${result.runId}\nthreadId: ${result.threadId}\n`,
+      );
+      printStage2Summary(await summarizeStage2(result.loaded));
+      break;
+    }
+    case "answer": {
+      const loaded = await answerTopologyDecision(
+        requirePositional(args, 0, "project path"),
+        requirePositional(args, 1, "Topology Decision id"),
+        requirePositional(args, 2, "option id"),
+        option(args, "note"),
+      );
+      printStage2Summary(await summarizeStage2(loaded));
+      break;
+    }
+    case "custom": {
+      const loaded = await answerTopologyCustom(
+        requirePositional(args, 0, "project path"),
+        requirePositional(args, 1, "Topology Decision id"),
+        requireOption(args, "text"),
+        option(args, "note"),
+      );
+      printStage2Summary(await summarizeStage2(loaded));
+      break;
+    }
+    case "review": {
+      const loaded = await reviewTopologyPlan(requirePositional(args, 0, "project path"));
+      printStage2Summary(await summarizeStage2(loaded));
+      break;
+    }
+    case "approve-plan": {
+      const loaded = await approveTopologyPlan(requirePositional(args, 0, "project path"));
+      printStage2Summary(await summarizeStage2(loaded));
+      break;
+    }
+    case "topology-reopen": {
+      const loaded = await reopenTopologyDecision(
+        requirePositional(args, 0, "project path"),
+        requirePositional(args, 1, "Topology Decision id"),
+        requireOption(args, "reason"),
+      );
+      printStage2Summary(await summarizeStage2(loaded));
+      break;
+    }
+    case "rework-start": {
+      assertOnlyOptions(args, ["proposal-json"]);
+      const proposalText = requireOption(args, "proposal-json");
+      let proposal: Stage2ArchitectureReworkProposal;
+      try {
+        proposal = JSON.parse(proposalText) as Stage2ArchitectureReworkProposal;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`Invalid --proposal-json: ${detail}`);
+      }
+      const loaded = await startStage2ArchitectureRework(
+        requirePositional(args, 0, "project path"),
+        proposal,
+      );
+      printStage2Summary(await summarizeStage2(loaded));
+      break;
+    }
+    case "rework-resume": {
+      assertOnlyOptions(args, []);
+      const loaded = await resumeStage2ArchitectureRework(
+        requirePositional(args, 0, "project path"),
+      );
+      printStage2Summary(await summarizeStage2(loaded));
       break;
     }
     case "design": {
@@ -315,25 +420,61 @@ async function commandReopen(args: ParsedArguments): Promise<void> {
 }
 
 async function commandCorrect(args: ParsedArguments): Promise<void> {
-  assertOnlyOptions(args, ["patch-json", "reason", "source"]);
+  assertOnlyOptions(args, ["proposal-json"]);
   const path = requirePositional(args, 0, "project path");
   const findingCodes = args.positional.slice(1);
-  const patchText = requireOption(args, "patch-json");
-  let patch: unknown;
+  const proposalText = requireOption(args, "proposal-json");
+  let proposal: ReviewCorrectionProposal;
   try {
-    patch = JSON.parse(patchText);
+    proposal = JSON.parse(proposalText) as ReviewCorrectionProposal;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Invalid --patch-json: ${detail}`);
+    throw new Error(`Invalid --proposal-json: ${detail}`);
+  }
+  if (
+    typeof proposal !== "object"
+    || proposal === null
+    || !("patch" in proposal)
+    || typeof proposal.rationale !== "string"
+    || !Array.isArray(proposal.evidenceSources)
+    || typeof proposal.evidenceCoverage !== "object"
+    || proposal.evidenceCoverage === null
+  ) {
+    throw new Error("Correction Proposal requires patch, rationale, evidenceSources, and evidenceCoverage");
   }
   const loaded = await applyReviewCorrection(path, {
     findingCodes,
-    patch,
-    rationale: requireOption(args, "reason"),
-    sources: options(args, "source"),
+    patch: proposal.patch,
+    rationale: proposal.rationale,
+    evidenceSources: proposal.evidenceSources,
+    evidenceCoverage: proposal.evidenceCoverage,
   });
   const correction = loaded.state.stage1.reviewCorrections?.at(-1);
   process.stdout.write(`Applied Review Correction: ${correction?.id ?? "missing"}\n`);
+  printSummary(await summarizeStage1(loaded));
+  printNext(loaded);
+}
+
+async function commandCorrectionMigrate(args: ParsedArguments): Promise<void> {
+  assertOnlyOptions(args, ["dry-run", "apply"]);
+  const dryRun = flag(args, "dry-run");
+  const apply = flag(args, "apply");
+  if (dryRun === apply) {
+    throw new Error("Use exactly one of --dry-run or --apply");
+  }
+  const report = await migrateReviewCorrectionsV2(
+    requirePositional(args, 0, "project path"),
+    apply,
+  );
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+}
+
+async function commandReleaseOverride(args: ParsedArguments): Promise<void> {
+  assertOnlyOptions(args, []);
+  const loaded = await releaseProjectSpecOverride(
+    requirePositional(args, 0, "project path"),
+    requirePositional(args, 1, "ProjectSpec target"),
+  );
   printSummary(await summarizeStage1(loaded));
   printNext(loaded);
 }
@@ -419,6 +560,11 @@ function printSummary(summary: Awaited<ReturnType<typeof summarizeStage1>>): voi
       `Revision: ${summary.revision}`,
       `Decisions: ${summary.answered} answered, ${summary.pending} pending, ${summary.deferred} deferred`,
       `Approval current: ${summary.approvalCurrent ? "yes" : "no"}`,
+      `ProjectSpec history: v${String(summary.projectSpecProtocolVersion)}, ${String(summary.projectSpecHistoryEvents)} events`,
+      `Legacy unresolved Corrections: ${String(summary.legacyUnresolvedCorrections)}`,
+      ...(summary.architectureRework === undefined
+        ? []
+        : [`Architecture rework: ${summary.architectureRework.id}, ${summary.architectureRework.status}, ${summary.architectureRework.repairKind}:${summary.architectureRework.repairTarget}`]),
       ...(summary.blockers.length === 0 ? [] : summary.blockers.map((item) => `Blocker: ${item}`)),
     ].join("\n") + "\n",
   );
@@ -431,14 +577,45 @@ function printStage2Summary(summary: Awaited<ReturnType<typeof summarizeStage2>>
       `Stage2: ${summary.status}`,
       `Revision: ${summary.revision}`,
       `State epoch: ${summary.stateEpoch}`,
-      `Modules: ${summary.complete}/${summary.total} complete`,
+      `Plan: ${summary.plan.path}, revision ${summary.plan.revision}, Decisions ${summary.plan.answeredDecisions}/${summary.plan.totalDecisions}, approval current=${String(summary.plan.approvalCurrent)}`,
+      ...(summary.plan.currentDecisionId === undefined ? [] : [`Current Decision: ${summary.plan.currentDecisionId}`]),
+      `Units: ${summary.complete}/${summary.total} complete`,
       ...(summary.active?.moduleId === undefined
         ? []
-        : [`Active: slot ${summary.active.slot}, module ${summary.active.moduleId}`]),
+        : [`Active: slot ${summary.active.slot}, Unit ${summary.active.moduleId}`]),
       ...(summary.shadow?.moduleId === undefined
         ? []
-        : [`Shadow: slot ${summary.shadow.slot}, module ${summary.shadow.moduleId}`]),
+        : [`Shadow: slot ${summary.shadow.slot}, Unit ${summary.shadow.moduleId}`]),
+      ...(summary.currentUserGate === undefined ? [] : [`User gate: ${summary.currentUserGate}`]),
+      ...(summary.architectureRework === undefined
+        ? []
+        : [
+            `Architecture rework: ${summary.architectureRework.id}, ${summary.architectureRework.status}`,
+            `Stage1 repair: ${summary.architectureRework.repair.kind}:${summary.architectureRework.repair.target}`,
+            `Affected Topology: ${summary.architectureRework.affectedTopologyDecisions.join(",")}`,
+            `Affected Units: ${summary.architectureRework.affectedUnits.join(",") || "none"}`,
+          ]),
+      ...summary.nextMachineActions.map((item) => `Machine action: ${item}`),
       ...(summary.blockers.length === 0 ? [] : summary.blockers.map((item) => `Blocker: ${item}`)),
+      ...(summary.board.length === 0
+        ? ["Board: no Implementation Unit has been confirmed"]
+        : [
+            "Board:",
+            "Unit | Architecture | DependsOn | Wave | Status | Agent | Design | Source | Test | Verification | Blocker",
+            ...summary.board.map((row) => [
+              row.unitId,
+              row.architectureModules.join(",") || "-",
+              row.dependsOn.join(",") || "-",
+              row.wave === null ? "-" : String(row.wave),
+              row.status,
+              row.agentRole,
+              row.designRevision === undefined ? row.designPath || "-" : `${row.designPath}@${String(row.designRevision)}`,
+              row.sourcePaths.join(",") || "-",
+              row.testPaths.join(",") || "-",
+              row.verificationStatus,
+              row.blockers.join("; ") || "-",
+            ].join(" | ")),
+          ]),
     ].join("\n") + "\n",
   );
 }
@@ -450,8 +627,46 @@ function printStage2Actions(actions: Stage2NextAction[]): void {
   }
   for (const action of actions) {
     switch (action.kind) {
+      case "architecture_rework_stage1":
+        process.stdout.write(
+          `Architecture Rework ${action.reworkId}: complete Stage1 ${action.repairKind}:${action.repairTarget}\n`,
+        );
+        break;
+      case "architecture_rework_resume":
+        process.stdout.write(`Architecture Rework ready to resume: ${action.reworkId}\n`);
+        break;
+      case "topology_planning":
+        process.stdout.write(
+          `Topology planning: ${action.decisionId}, ${action.topic}, researchPolicy=${action.researchPolicy}, slot ${action.slot}\n`,
+        );
+        break;
+      case "topology_decision":
+        process.stdout.write(
+          [
+            `Topology Decision: ${action.decision.id}`,
+            action.decision.question,
+            `Plan: ${action.planPath}@${String(action.planRevision)}`,
+            `Structured option details: ${action.planPath}`,
+            `Recommendation: ${action.proposal.recommendation}`,
+            ...action.proposal.options.map((option) =>
+              `- ${option.id}: ${option.label}; ${option.summary}; benefits=${option.benefits.join("; ") || "none"}; costs=${option.costs.join("; ") || "none"}; risks=${option.risks.join("; ") || "none"}`
+            ),
+            ...action.proposal.openQuestions.map((question) => `Open question: ${question}`),
+          ].join("\n") + "\n",
+        );
+        break;
+      case "topology_review":
+        process.stdout.write(
+          `Topology review: ${action.planPath}@${String(action.planRevision)}${action.issues.length === 0 ? "" : `\n${action.issues.map((item) => `- ${item}`).join("\n")}`}\n`,
+        );
+        break;
+      case "topology_approval":
+        process.stdout.write(
+          `Topology approval required: ${action.planPath}@${String(action.planRevision)}, sha256=${action.planDocumentSha256}\n`,
+        );
+        break;
       case "shadow_design":
-        process.stdout.write(`Shadow Design: ${action.moduleId}, slot ${action.slot}\n`);
+        process.stdout.write(`Shadow Design: Unit ${action.moduleId}, slot ${action.slot}\n`);
         break;
       case "design_revision":
         process.stdout.write(
@@ -593,7 +808,9 @@ processor-agent stage1 commands:
   custom <path> <decision-id> --text text [--note text]
   defer <path> <decision-id> --until point --note rationale
   reopen <path> <decision-id> --reason rationale
-  correct <path> <finding-code> [finding-code...] --patch-json json --reason rationale --source locator
+  correct <path> <finding-code> [finding-code...] --proposal-json json
+  correction-migrate <path> --dry-run|--apply
+  release-override <path> <project-spec-target>
   probe <path>
   profile-refresh <path> [--adopt-profile-defaults] [--reset-changed-advice]
   advise <path> [decision-id] [--refresh]
@@ -606,13 +823,22 @@ processor-agent stage1 commands:
 
 processor-agent stage2 commands:
   init <path>
+  migrate <path>
   status <path> [--json]
   next <path> [--json]
-  design <path> [module-id] [--instruction text]
-  approve <path> <module-id> --verification-mode independent_workers|active_only
-  implement <path> [module-id]
-  verify <path> [module-id]
-  reopen <path> <module-id> --reason rationale
+  plan <path> [decision-id] [--instruction text] [--refresh]
+  answer <path> <decision-id> <option-id> [--note text]
+  custom <path> <decision-id> --text conclusion [--note text]
+  topology-reopen <path> <decision-id> --reason rationale
+  rework-start <path> --proposal-json json
+  rework-resume <path>
+  review <path>
+  approve-plan <path>
+  design <path> [unit-id] [--instruction text]
+  approve <path> <unit-id> --verification-mode independent_workers|active_only
+  implement <path> [unit-id]
+  verify <path> [unit-id]
+  reopen <path> <unit-id> --reason rationale
 `);
 }
 

@@ -33,12 +33,16 @@ import {
   getNextStage1Action,
   initStage1,
   loadStage1,
+  migrateReviewCorrectionsV2,
   probeEnvironment,
+  releaseProjectSpecOverride,
+  replayProjectSpecHistory,
   refreshStage1Profile,
   reopenDecision,
   reviewStage1,
   saveDecisionAdvice,
   saveArchitectureReview,
+  saveProjectState,
   scaffoldStage1,
   summarizeStage1,
 } from "../src/stage1.js";
@@ -185,6 +189,14 @@ test("Review Correction updates structured project facts and requires a fresh au
       stage2Order: ["core", "queue"],
     },
   };
+  const statePath = join(fixture.project, ".assistant", "project.yaml");
+  const persistedBefore = parse(await readFile(statePath, "utf8")) as {
+    stage1: {
+      projectSpecHistoryStorage?: { path: string };
+    };
+  };
+  const historyPathBefore = persistedBefore.stage1.projectSpecHistoryStorage?.path;
+  assert.ok(historyPathBefore);
   const correctionResult = spawnSync(
     process.execPath,
     [
@@ -193,12 +205,22 @@ test("Review Correction updates structured project facts and requires a fresh au
       "correct",
       fixture.project,
       "MODULE_QUEUE_MISSING",
-      "--patch-json",
-      JSON.stringify(patch),
-      "--reason",
-      "独立 queue 是当前项目已确认的流水边界。",
-      "--source",
-      "architecture/overview.md#架构决策",
+      "--proposal-json",
+      JSON.stringify({
+        patch,
+        rationale: "独立 queue 是当前项目已确认的流水边界。",
+        evidenceSources: [{
+          id: "EV_QUEUE",
+          kind: "user_directive",
+          locator: "MODULE_QUEUE_MISSING",
+          claim: "用户确认独立 queue 持有 entries 和 valid，并位于 core 之后。",
+          locations: [],
+        }],
+        evidenceCoverage: {
+          "architecture.modules": ["EV_QUEUE"],
+          "architecture.stage2Order": ["EV_QUEUE"],
+        },
+      }),
     ],
     { encoding: "utf8" },
   );
@@ -209,6 +231,45 @@ test("Review Correction updates structured project facts and requires a fresh au
   assert.equal(loaded.state.stage1.status, "ARCHITECTURE_REVIEW");
   assert.equal(loaded.state.stage1.review, undefined);
   assert.equal(loaded.state.stage1.reviewCorrections?.[0]?.status, "applied");
+  const correction = loaded.state.stage1.reviewCorrections?.[0];
+  assert.equal(correction?.schemaVersion, 2);
+  assert.equal("changes" in (correction ?? {}), false);
+  assert.equal(loaded.state.stage1.projectSpecHistory?.events.length, 1);
+  assert.deepEqual(replayProjectSpecHistory(loaded.state), loaded.state.stage1.projectSpec);
+  const modulesEvent = loaded.state.stage1.projectSpecHistory?.events[0]?.patches.find(
+    (entry) => entry.target === "architecture.modules",
+  );
+  assert.equal(modulesEvent?.kind, "keyed_collection");
+  if (modulesEvent?.kind === "keyed_collection") {
+    assert.deepEqual(modulesEvent.add.map((item) => item.id), ["queue"]);
+  }
+  assert.doesNotMatch(
+    await readFile(statePath, "utf8"),
+    /previousValue:/u,
+  );
+  const persistedAfter = parse(await readFile(statePath, "utf8")) as {
+    stage1: {
+      projectSpecHistory?: unknown;
+      projectSpecHistoryStorage?: {
+        path: string;
+        eventCount: number;
+        compressedBytes: number;
+      };
+    };
+  };
+  assert.equal(persistedAfter.stage1.projectSpecHistory, undefined);
+  assert.equal(persistedAfter.stage1.projectSpecHistoryStorage?.eventCount, 1);
+  assert.ok((persistedAfter.stage1.projectSpecHistoryStorage?.compressedBytes ?? 0) > 0);
+  const historyPathAfter = persistedAfter.stage1.projectSpecHistoryStorage?.path;
+  assert.ok(historyPathAfter);
+  assert.notEqual(historyPathAfter, historyPathBefore);
+  await readFile(join(fixture.project, historyPathAfter));
+  await assert.rejects(readFile(join(fixture.project, historyPathBefore)), /ENOENT/u);
+  assert.equal(
+    (await readdir(join(fixture.project, ".assistant")))
+      .filter((path) => path.startsWith("project-spec-history-")).length,
+    1,
+  );
   assert.equal(loaded.state.stage1.reviewHistory?.[0]?.findings[0]?.status, "superseded");
   assert.equal(loaded.loadedProfile.profile.architecture.modules.length, 1);
   const manifest = parse(
@@ -223,6 +284,25 @@ test("Review Correction updates structured project facts and requires a fresh au
   loaded = await loadStage1(fixture.project);
   assert.equal(loaded.state.stage1.reviewCorrections?.[0]?.status, "verified");
   await approveStage1(fixture.project);
+});
+
+test("ProjectSpec history sidecar rejects corrupted content", async () => {
+  const fixture = await createFixture();
+  await initStage1(fixture.project, fixture.profile);
+  const persisted = parse(
+    await readFile(join(fixture.project, ".assistant", "project.yaml"), "utf8"),
+  ) as {
+    stage1: {
+      projectSpecHistoryStorage?: { path: string; compressedBytes: number };
+    };
+  };
+  const storage = persisted.stage1.projectSpecHistoryStorage;
+  assert.ok(storage);
+  await writeFile(
+    join(fixture.project, storage.path),
+    Buffer.alloc(storage.compressedBytes),
+  );
+  await assert.rejects(loadStage1(fixture.project), /sidecar hash mismatch/u);
 });
 
 test("Review Correction enforces repair ownership and declared targets", async () => {
@@ -257,7 +337,14 @@ test("Review Correction enforces repair ownership and declared targets", async (
       findingCodes: ["D1_SCOPE_WRONG"],
       patch: { architecture: { invariants: ["In order"] } },
       rationale: "错误入口测试。",
-      sources: ["architecture/overview.md"],
+      evidenceSources: [{
+        id: "EV_WRONG_ENTRY",
+        kind: "user_directive",
+        locator: "D1_SCOPE_WRONG",
+        claim: "用户要求通过错误入口验证 repair ownership 门禁。",
+        locations: [],
+      }],
+      evidenceCoverage: { "architecture.invariants": ["EV_WRONG_ENTRY"] },
     }),
     /must be repaired through decision/u,
   );
@@ -269,6 +356,253 @@ test("Review Correction enforces repair ownership and declared targets", async (
   assert.equal(reopened.loaded.state.stage1.decisions.D1?.status, "pending");
   assert.equal(reopened.loaded.state.stage1.review, undefined);
   assert.equal(reopened.loaded.state.stage1.reviewHistory?.[0]?.findings[0]?.code, "D1_SCOPE_WRONG");
+});
+
+test("Review Correction v2 rejects audit-only, uncovered, and stale Evidence", async () => {
+  const fixture = await createInvariantCorrectionFixture();
+  const loaded = await loadStage1(fixture.project);
+  const base = {
+    findingCodes: ["INVARIANT_INCOMPLETE"],
+    patch: { architecture: { invariants: ["In order", "Project override"] } },
+    rationale: "补齐项目级不变量。",
+    evidenceCoverage: { "architecture.invariants": ["EV_1"] },
+  };
+
+  await assert.rejects(
+    applyReviewCorrection(fixture.project, {
+      ...base,
+      evidenceSources: [{
+        id: "EV_1",
+        kind: "project_document",
+        locator: ".assistant/reviews/stage1.json",
+        digest: "stale",
+        claim: "Audit finding 只能定位缺口。",
+        locations: [],
+      }],
+    }),
+    /Audit report cannot be used/u,
+  );
+  await assert.rejects(
+    applyReviewCorrection(fixture.project, {
+      ...base,
+      evidenceSources: [invariantUserEvidence()],
+      evidenceCoverage: {},
+    }),
+    /has no Evidence coverage/u,
+  );
+  await assert.rejects(
+    applyReviewCorrection(fixture.project, {
+      ...base,
+      evidenceSources: [{
+        id: "EV_1",
+        kind: "decision",
+        locator: "D1",
+        revision: loaded.state.stage1.revision - 1,
+        claim: "D1 当前结论要求顺序执行并补齐项目不变量。",
+        locations: ["D1"],
+      }],
+    }),
+    /stale Decision revision/u,
+  );
+  await assert.rejects(
+    applyReviewCorrection(fixture.project, {
+      ...base,
+      evidenceSources: [{
+        id: "EV_1",
+        kind: "project_document",
+        locator: "architecture/overview.md",
+        digest: "stale",
+        claim: "Architecture Overview 记录当前顺序执行不变量。",
+        locations: ["全局不变量"],
+      }],
+    }),
+    /stale project document digest/u,
+  );
+  await assert.rejects(
+    applyReviewCorrection(fixture.project, {
+      ...base,
+      evidenceSources: [{
+        id: "EV_1",
+        kind: "user_directive",
+        locator: "INVARIANT_INCOMPLETE",
+        claim: "太短",
+        locations: [],
+      }],
+    }),
+    /not self-contained/u,
+  );
+  assert.equal((await loadStage1(fixture.project)).state.stage1.reviewCorrections, undefined);
+});
+
+test("Review Correction must include the current open audit finding", async () => {
+  const fixture = await createFixture();
+  await initStage1(fixture.project, fixture.profile);
+  await answerDecision(fixture.project, "D1", "a");
+  await answerDecision(fixture.project, "D2", "b");
+  await reviewStage1(fixture.project);
+  const loaded = await loadStage1(fixture.project);
+  await saveArchitectureReview(fixture.project, {
+    reviewedAggregateSha256: currentGeneratedAggregate(loaded.state),
+    verdict: "fail",
+    summary: "存在两个按顺序处理的项目事实缺口。",
+    findings: [
+      {
+        severity: "error",
+        code: "FIRST_FINDING",
+        message: "先补齐项目不变量。",
+        artifact: "architecture/overview.md",
+        relatedDecision: "D1",
+        repairKind: "project_spec",
+        repairTarget: "architecture.invariants",
+        requiredClosure: ["补齐项目不变量"],
+        status: "open",
+      },
+      {
+        severity: "error",
+        code: "SECOND_FINDING",
+        message: "再补齐指令范围。",
+        artifact: "architecture/overview.md",
+        relatedDecision: "D1",
+        repairKind: "project_spec",
+        repairTarget: "architecture.supportedInstructions",
+        requiredClosure: ["补齐指令范围"],
+        status: "open",
+      },
+    ],
+  });
+
+  await assert.rejects(
+    applyReviewCorrection(fixture.project, {
+      findingCodes: ["SECOND_FINDING"],
+      patch: {
+        architecture: {
+          supportedInstructions: ["Test instruction", "Second instruction"],
+        },
+      },
+      rationale: "尝试跳过当前 finding。",
+      evidenceSources: [{
+        id: "EV_SECOND",
+        kind: "user_directive",
+        locator: "SECOND_FINDING",
+        claim: "用户确认增加第二条测试指令，并要求记录在支持范围内。",
+        locations: [],
+      }],
+      evidenceCoverage: {
+        "architecture.supportedInstructions": ["EV_SECOND"],
+      },
+    }),
+    /FIRST_FINDING must be handled first/u,
+  );
+});
+
+test("ProjectSpec history rebases Profile refresh and releases overrides explicitly", async () => {
+  const fixture = await createInvariantCorrectionFixture();
+  await applyReviewCorrection(fixture.project, {
+    findingCodes: ["INVARIANT_INCOMPLETE"],
+    patch: { architecture: { invariants: ["In order", "Project override"] } },
+    rationale: "用户确认项目级不变量覆盖。",
+    evidenceSources: [invariantUserEvidence()],
+    evidenceCoverage: { "architecture.invariants": ["EV_1"] },
+  });
+
+  const refreshedProfile = join(fixture.root, "profile-v2.yaml");
+  await writeFile(
+    refreshedProfile,
+    fixtureProfile()
+      .replace("version: 1.0.0", "version: 2.0.0")
+      .replace("systemBoundary: [Test boundary]", "systemBoundary: [Test boundary, Added boundary]")
+      .replace("invariants: [In order]", "invariants: [Profile replacement]"),
+    "utf8",
+  );
+  let loaded = await refreshStage1Profile(fixture.project, refreshedProfile);
+  assert.deepEqual(loaded.state.stage1.projectSpec?.architecture.invariants, [
+    "In order",
+    "Project override",
+  ]);
+  assert.deepEqual(loaded.state.stage1.projectSpec?.architecture.systemBoundary, [
+    "Test boundary",
+    "Added boundary",
+  ]);
+  assert.deepEqual(
+    loaded.state.stage1.projectSpecHistory?.events.map((event) => event.kind),
+    ["review_correction", "profile_refresh"],
+  );
+  assert.deepEqual(loaded.state.stage1.overriddenTargets, ["architecture.invariants"]);
+
+  loaded = await releaseProjectSpecOverride(fixture.project, "architecture.invariants");
+  assert.deepEqual(loaded.state.stage1.projectSpec?.architecture.invariants, ["Profile replacement"]);
+  assert.deepEqual(loaded.state.stage1.overriddenTargets, []);
+  assert.equal(loaded.state.stage1.projectSpecHistory?.events.at(-1)?.kind, "override_release");
+  assert.deepEqual(replayProjectSpecHistory(loaded.state), loaded.state.stage1.projectSpec);
+});
+
+test("Review Correction v1 migration is explicit, compact, and hash preserving", async () => {
+  const fixture = await createInvariantCorrectionFixture();
+  await applyReviewCorrection(fixture.project, {
+    findingCodes: ["INVARIANT_INCOMPLETE"],
+    patch: { architecture: { invariants: ["In order", "Legacy override"] } },
+    rationale: "构造 v1 迁移夹具。",
+    evidenceSources: [invariantUserEvidence()],
+    evidenceCoverage: { "architecture.invariants": ["EV_1"] },
+  });
+  await reviewStage1(fixture.project);
+  await savePassingReview(fixture.project);
+  await approveStage1(fixture.project);
+
+  const loaded = await loadStage1(fixture.project);
+  const currentSpec = structuredClone(loaded.state.stage1.projectSpec!);
+  const correction = loaded.state.stage1.reviewCorrections?.[0];
+  assert.equal(correction?.schemaVersion, 2);
+  if (correction?.schemaVersion !== 2) {
+    throw new Error("Expected a v2 correction fixture");
+  }
+  delete loaded.state.stage1.projectSpecHistory;
+  delete loaded.state.stage1.projectSpecHistoryStorage;
+  delete loaded.state.stage1.overriddenTargets;
+  loaded.state.stage1.reviewCorrections = [{
+    schemaVersion: 1,
+    id: correction.id,
+    findingCodes: [...correction.findingCodes],
+    repairKind: "project_spec",
+    repairTargets: ["architecture.invariants"],
+    requiredClosure: [...correction.requiredClosure],
+    changes: [{
+      target: "architecture.invariants",
+      previousValue: ["In order"],
+      nextValue: ["In order", "Legacy override"],
+    }],
+    rationale: correction.rationale,
+    sources: [correction.findingSource.reportPath],
+    confirmedAt: correction.confirmedAt,
+    appliedAt: correction.appliedAt,
+    status: "verified",
+    sourceAuditAggregateSha256: correction.findingSource.reviewedAggregateSha256,
+    ...(correction.verifiedByAuditAggregateSha256 === undefined
+      ? {}
+      : { verifiedByAuditAggregateSha256: correction.verifiedByAuditAggregateSha256 }),
+  }];
+  await saveProjectState(loaded.root, loaded.state);
+
+  const statePath = join(fixture.project, ".assistant", "project.yaml");
+  const before = await readFile(statePath, "utf8");
+  const approvalBefore = structuredClone(loaded.state.stage1.approval);
+  const documentHashesBefore = structuredClone(loaded.state.stage1.generatedDocumentHashes);
+  const dryRun = await migrateReviewCorrectionsV2(fixture.project, false);
+  assert.equal(dryRun.applied, false);
+  assert.equal(dryRun.sourceProtocolVersion, 1);
+  assert.equal(dryRun.legacyUnresolvedCount, 1);
+  assert.equal(dryRun.currentProjectSpecSha256, dryRun.replayedProjectSpecSha256);
+  assert.equal(await readFile(statePath, "utf8"), before);
+
+  const applied = await migrateReviewCorrectionsV2(fixture.project, true);
+  assert.equal(applied.applied, true);
+  const migrated = await loadStage1(fixture.project);
+  assert.equal(migrated.state.stage1.projectSpecHistory?.protocolVersion, 2);
+  assert.equal(migrated.state.stage1.reviewCorrections?.[0]?.status, "legacy_unresolved");
+  assert.deepEqual(migrated.state.stage1.approval, approvalBefore);
+  assert.deepEqual(migrated.state.stage1.generatedDocumentHashes, documentHashesBefore);
+  assert.deepEqual(migrated.state.stage1.projectSpec, currentSpec);
+  assert.deepEqual(replayProjectSpecHistory(migrated.state), currentSpec);
 });
 
 test("Stage1 enforces decision dependencies", async () => {
@@ -496,6 +830,10 @@ test("Workspace Agent prompt routes natural language through the Harness", async
   assert.match(prompt, /processor-agent stage1 correct \. <finding-code>/u);
   assert.match(prompt, /repairKind=decision/u);
   assert.match(prompt, /影响正式决策的来源调研不得由 Workspace Agent 在主上下文中直接完成/u);
+  assert.match(prompt, /Correction Proposal JSON 只作为机器输入/u);
+  assert.match(prompt, /禁止输出完整 modules 数组/u);
+  assert.match(prompt, /target -> Evidence ID -> 来源与主张/u);
+  assert.match(prompt, /不得回显已经提交的 Proposal/u);
   assert.match(prompt, /nextAction=decision_ready/u);
   assert.match(prompt, /不得手工修改 `\.assistant\/`/u);
   assert.match(prompt, /不得一次要求用户确认多个架构决策/u);
@@ -924,6 +1262,46 @@ async function createFixture(): Promise<{ root: string; project: string; profile
   await mkdir(project, { recursive: true });
   await writeFile(profile, fixtureProfile(), "utf8");
   return { root, project, profile };
+}
+
+async function createInvariantCorrectionFixture(): Promise<{
+  root: string;
+  project: string;
+  profile: string;
+}> {
+  const fixture = await createFixture();
+  await initStage1(fixture.project, fixture.profile);
+  await answerDecision(fixture.project, "D1", "a");
+  await answerDecision(fixture.project, "D2", "b");
+  await reviewStage1(fixture.project);
+  const loaded = await loadStage1(fixture.project);
+  await saveArchitectureReview(fixture.project, {
+    reviewedAggregateSha256: currentGeneratedAggregate(loaded.state),
+    verdict: "fail",
+    summary: "项目级不变量需要补齐。",
+    findings: [{
+      severity: "error",
+      code: "INVARIANT_INCOMPLETE",
+      message: "Architecture 未记录项目新增不变量。",
+      artifact: "architecture/overview.md",
+      relatedDecision: "D1",
+      repairKind: "project_spec",
+      repairTarget: "architecture.invariants",
+      requiredClosure: ["记录新增不变量及其依据"],
+      status: "open",
+    }],
+  });
+  return fixture;
+}
+
+function invariantUserEvidence() {
+  return {
+    id: "EV_1",
+    kind: "user_directive" as const,
+    locator: "INVARIANT_INCOMPLETE",
+    claim: "用户确认新增项目级不变量，并要求其覆盖 Profile 默认值。",
+    locations: [],
+  };
 }
 
 function fixtureProfile(): string {

@@ -238,7 +238,7 @@ async function prepareWorkspaceAgent(projectPath: string): Promise<{ root: strin
 1. 运行 \`processor-agent stage1 status . --json\` 获取磁盘中的当前状态。
 2. 运行 \`processor-agent stage1 next . --json\` 获取当前唯一待处理决策。
 3. 根据 next 的 kind 执行唯一当前动作。kind=research_required 时先运行 Research Task；kind=decision_ready 时展示一个待确认决策；kind=review_finding 时展示一个审查缺口和对应修正入口；kind=audit_refresh_required 时重新运行 audit。
-4. Stage1 为 STAGE1_COMPLETE 时检查 Stage2。Stage2 已初始化则运行 \`processor-agent stage2 status . --json\` 和 \`processor-agent stage2 next . --json\`；尚未初始化则等待用户明确要求开始 Stage2 后运行 \`processor-agent stage2 init .\`。
+4. Stage1 为 STAGE1_COMPLETE 时检查 Stage2。Stage2 已初始化则运行 \`processor-agent stage2 status . --json\` 和 \`processor-agent stage2 next . --json\`；尚未初始化则等待用户明确要求开始 Stage2 后运行 \`processor-agent stage2 init .\`。初始化只创建 Implementation Topology Decision Loop，不直接启动 Unit Design。
 
 交互协议：
 1. Harness 是工作流状态、生成文档、审批哈希和阶段转换的唯一写入者。不得手工修改 \`.assistant/\`，不得直接改写 Harness 管理的 Stage1 正式草案。
@@ -251,25 +251,38 @@ async function prepareWorkspaceAgent(projectPath: string): Promise<{ root: strin
 8. 用户提出候选项之外的结论时运行 \`processor-agent stage1 custom . <decision-id> --text <结论> --note <理由>\`。语义无法唯一映射时先提一个澄清问题，不提交状态。
 9. 用户修正已经回答或 deferred 的 Decision 时，先运行 \`processor-agent stage1 reopen . <decision-id> --reason <修正原因>\`。Harness 会保留此前结论的修正记录，并把全部传递依赖 Decision 重置为 pending。随后重新查询 \`status\` 和 \`next\`。修正模式以此前结论为基线，Profile 选项只作参考；不得因重开而丢弃未被新证据否定的既有内容。
 10. 只有非 blocking Decision 且用户明确要求延期时，才运行 \`processor-agent stage1 defer\`。推荐选项和修订结论均需用户明确确认。
-11. kind=review_finding 时只处理该 finding。repairKind=decision 时和用户闭合修订结论，得到明确确认后运行 \`stage1 reopen\`；repairKind=project_spec 时读取当前正式草案，形成只包含允许字段的结构化 JSON patch，说明旧值、新值、理由和来源，得到明确确认后运行 \`processor-agent stage1 correct . <finding-code> --patch-json <json> --reason <理由> --source <来源>\`；repairKind=profile 时报告通用 Profile 缺陷，修复框架 Profile 后运行 \`profile-refresh\`。不得把 relatedDecision 当作 repairKind。
-12. Review Correction 只能替换 \`architecture.systemBoundary\`、\`architecture.supportedInstructions\`、\`architecture.invariants\`、\`architecture.sharedFields\`、\`architecture.globalProtocols\`、\`architecture.counterRules\`、\`architecture.modules\`、\`architecture.stage2Order\`、\`verification.referenceModel\`、\`verification.layers\`、\`verification.requiredScenarios\`、\`verification.counters\`、\`verification.decisionAcceptance\` 的完整字段值。不得直接编辑生成文档。相同根因的 finding 可以在一次 correct 中合并，其余情况每轮只处理一个。
-13. 修正后必须重新运行 \`review\` 和独立 \`audit\`。旧 finding 只能标记为 superseded。只有当前文档哈希的 audit pass 且 Review Correction 均为 verified 时才可 approve。
-14. \`review\`、\`audit\`、\`approve\`、\`scaffold\` 和 \`complete\` 必须按当前状态调用对应 Harness 命令。\`approve\` 必须得到用户在查看审查结果后的明确批准。
-15. 每次成功提交后重新查询状态，只展示下一项决策、审查缺口或阶段动作。不得一次要求用户确认多个架构决策。
-16. Harness 命令失败时原样保留状态，报告具体错误和恢复条件。不得通过直接编辑状态或正式草案绕过门禁。
-17. 不要求用户手工执行 Harness 命令，不得在本会话内再次调用 \`processor-agent open\`。
+11. kind=review_finding 时只处理该 finding。repairKind=decision 时和用户闭合修订结论，得到明确确认后运行 \`stage1 reopen\`；repairKind=project_spec 时读取当前正式草案，形成包含 patch、rationale、evidenceSources 和 evidenceCoverage 的 Correction Proposal。向用户展示以 changed target 为单位的语义差异、每个 target 的证据和影响，得到明确确认后运行 \`processor-agent stage1 correct . <finding-code> --proposal-json <json>\`；repairKind=profile 时报告通用 Profile 缺陷，修复框架 Profile 后运行 \`profile-refresh\`。不得把 relatedDecision 当作 repairKind。
+12. Review Correction 只能替换 \`architecture.systemBoundary\`、\`architecture.supportedInstructions\`、\`architecture.invariants\`、\`architecture.sharedFields\`、\`architecture.globalProtocols\`、\`architecture.counterRules\`、\`architecture.modules\`、\`architecture.stage2Order\`、\`verification.referenceModel\`、\`verification.layers\`、\`verification.requiredScenarios\`、\`verification.counters\`、\`verification.decisionAcceptance\` 的完整字段值。每个 changed target 都必须由 evidenceCoverage 指向当前有效 Evidence。\`.assistant/reviews/stage1.json\` 只属于 Harness 自动生成的 findingSource，不能作为 evidenceSources。不得直接编辑生成文档。相同根因的 finding 可以在一次 correct 中合并，其余情况每轮只处理一个。
+13. Correction Evidence 引用 Decision 时携带当前 Stage1 revision，引用项目文档时携带当前 SHA-256，引用 Research 时携带当前 fingerprint，引用 Profile 时携带当前 digest。user_directive 必须保存完整可独立理解的规则。Evidence 漂移时重新读取来源并重建 Proposal。
+14. 修正后必须重新运行 \`review\` 和独立 \`audit\`。旧 finding 只能标记为 superseded。只有当前文档哈希的 audit pass 且 Review Correction 均为 verified 时才可 approve。Profile refresh 默认保留 overriddenTargets；只有用户明确要求交还 Profile 管理时才运行 \`stage1 release-override\`。
+15. \`review\`、\`audit\`、\`approve\`、\`scaffold\` 和 \`complete\` 必须按当前状态调用对应 Harness 命令。\`approve\` 必须得到用户在查看审查结果后的明确批准。
+16. 每次成功提交后重新查询状态，只展示下一项决策、审查缺口或阶段动作。不得一次要求用户确认多个架构决策。
+17. Harness 命令失败时原样保留状态，报告具体错误和恢复条件。不得通过直接编辑状态或正式草案绕过门禁。
+18. 不要求用户手工执行 Harness 命令，不得在本会话内再次调用 \`processor-agent open\`。
+
+用户呈现协议：
+1. \`status --json\`、\`next --json\`、audit JSON 和 Correction Proposal JSON 只作为机器输入。回复中不得粘贴原始 JSON、YAML、完整对象或完整数组。
+2. 每轮只展示当前动作需要的信息，顺序为状态摘要、当前 finding 或 Decision、语义差异、Evidence、影响和一个确认问题。已经完成的动作使用一行结果概括。
+3. Review Correction 的字符串数组使用“新增、删除、顺序变化”表示。带 \`id\`、\`name\` 或 \`decisionId\` 的集合只列新增、删除和修改的实体，省略未变化实体。
+4. \`architecture.modules\` 按 Module ID 展示。每个变化 Module 只列动作以及 \`responsibility\`、\`stateOwnership\`、\`dependsOn\`、\`interfaces\` 的变化；禁止输出完整 modules 数组。内容较多时先给 Module 级摘要，再按用户点名展开一个 Module。
+5. 标量或短文本显示旧值和新值。长文本显示结论变化和受影响规则，保留正式文档路径供核对。
+6. Evidence 使用“target -> Evidence ID -> 来源与主张”的短表或短列表。Evidence 原始对象和 digest 不进入正文，用户要求核验时再显示对应定位信息。
+7. Correction 应用后只报告 Correction ID、changed targets、更新的正式文档、Stage1 revision 和下一个 action。不得回显已经提交的 Proposal。
 
 Stage2 交互协议：
-1. 每次处理 Stage2 用户回复前重新运行 \`stage2 status\` 和 \`stage2 next\`。Harness 可以同时报告 Active 与 Shadow 的机器动作，面向用户的 Design 批准一次只处理一个模块。
-2. kind=shadow_design 时运行 \`processor-agent stage2 design . <module-id>\`。Shadow Agent 只读调研并形成 \`design/<module-id>.md\` 草案，不得由 Workspace Agent 直接代写正式 Design。
-3. kind=design_revision 时向用户展示 Design 路径和 issues，逐项讨论后使用 \`stage2 design . <module-id> --instruction <修订要求>\` 继续闭合。kind=design_approval 时展示 Design revision、实现路径、验收命令和风险，再进入用户批准门禁。
-4. Design 批准必须同时询问：“本模块是否启用独立 Static Review Worker 与独立 Verification Worker？”用户选择启用时提交 \`--verification-mode independent_workers\`，用户选择不启用时提交 \`--verification-mode active_only\`。不得继承上一模块选择，不得替用户推断默认值。
-5. 只有用户明确批准当前 Design 并选择验证模式后，才运行 \`processor-agent stage2 approve . <module-id> --verification-mode <mode>\`。
-6. kind=active_implementation 时运行 \`processor-agent stage2 implement . <module-id>\`。Active Agent 只返回允许路径内的文件提案，Harness 校验 Design 哈希、baseSha256 和路径后写入，并执行主验证。
-7. kind=verification 时运行 \`processor-agent stage2 verify . <module-id>\`。independent_workers 启动两个新的短生命周期 Worker；active_only 由当前 Active Agent 完成分离的静态自审和验证审查。两种模式都必须保留 Harness 命令证据。
-8. 用户修正已批准 Design 或实现暴露 Design 缺口时运行 \`processor-agent stage2 reopen . <module-id> --reason <原因>\`。不得直接修改 Design、源码或 \`.assistant/\` 绕过重开。
-9. Shadow 与 Active 角色、threadId、lease 和 state epoch 由 Harness 管理。Workspace Agent 不直接启动、恢复或轮转底层 Codex 会话。
-10. 每次 Stage2 命令完成后重新查询状态和 ready actions。只有模块证据闭合后才能报告 COMPLETE，只有全部模块完成后才能报告 BASELINE_READY。
+1. 每次处理 Stage2 用户回复前重新运行 \`stage2 status . --json\` 和 \`stage2 next . --json\`。每次都向用户同步 plan revision、Decision 进度、完整 Unit 看板、当前用户门禁和下一机器动作。
+2. kind=topology_planning 时自动运行 \`processor-agent stage2 plan . <decision-id>\`。required 调研由独立 Research Worker 先产生证据，Topology Planner 只基于证据形成当前一个 Decision Packet。Workspace Agent 不在主上下文自行完成正式调研。用户要求补充或重做调研时，将关注点放入 \`--instruction\` 并使用 \`--refresh\` 强制新 Research 运行。
+3. kind=topology_decision 时只展示当前 Decision 的事实、证据、候选、推荐、成本、风险和影响。用户选择 option 后运行 \`stage2 answer . <decision-id> <option-id>\`；用户给出唯一的自定义结论时运行 \`stage2 custom . <decision-id> --text <结论>\`。推荐不构成用户批准。
+4. 用户修正已确认的 Topology Decision 时运行 \`stage2 topology-reopen . <decision-id> --reason <原因>\`。Harness 保留旧结论，使全部传递依赖 Decision 失效，并重建当前 Plan。
+5. kind=topology_review 且 issues 为空时自动运行 \`stage2 review .\`。审查通过后展示 \`design/plan.md\`、Unit 映射、Interface owner、路径 owner、DAG、wave、完成条件和风险。只有用户明确批准当前 Plan 后才运行 \`stage2 approve-plan .\`。
+6. kind=shadow_design 时运行 \`processor-agent stage2 design . <unit-id>\`。Shadow Agent 只读调研并形成 \`design/<unit-id>.md\` 草案，不得由 Workspace Agent 直接代写正式 Design。
+7. kind=design_revision 时向用户展示 Design 路径和 issues，逐项讨论后使用 \`stage2 design . <unit-id> --instruction <修订要求>\` 继续闭合。kind=design_approval 时展示 Design revision、实现路径、验收命令和风险。
+8. Design 批准必须同时询问：“本 Unit 是否启用独立 Static Review Worker 与独立 Verification Worker？”只有用户明确批准并选择 \`independent_workers\` 或 \`active_only\` 后才运行 \`stage2 approve . <unit-id> --verification-mode <mode>\`。不得继承上一 Unit 选择。
+9. kind=active_implementation 时运行 \`stage2 implement . <unit-id>\`。kind=verification 时运行 \`stage2 verify . <unit-id>\`。用户修正已批准 Design 或实现暴露缺口时运行 \`stage2 reopen . <unit-id> --reason <原因>\`。不得直接修改 Design、源码或 \`.assistant/\` 绕过 Harness。
+10. Stage2 发现已批准 Architecture 错误时，不得通过 \`stage2 reopen\` 或直接改 Design 掩盖。先形成单一 repair target 的 Architecture Rework Proposal，包含 summary、rationale、source、repair、requiredClosure、evidenceSources、affectedTopologyDecisions 和 affectedUnits。向用户展示返工范围和失效影响，得到明确确认后运行 \`stage2 rework-start . --proposal-json <json>\`。
+11. kind=architecture_rework_stage1 时转入当前 Stage1 next 动作，按 Decision reopen 或 Review Correction v2 完成 Research、Review、Audit 和用户 Approval。Stage1 新 approval 当前有效后，kind=architecture_rework_resume 时自动运行 \`stage2 rework-resume .\`，再展示失效的 Topology Decisions、Unit 和旧证据哈希。
+12. Architecture Rework 返回后，只重新闭合 Harness 标记失效的 Topology Decisions 和 \`NEEDS_REALIGN\` Units。未受影响 Unit 的正式状态和证据继续保留。Unit ID、路径 owner 或 DAG 变化超出用户确认的 affectedUnits 时停止并报告门禁。
+13. Planner、Shadow 与 Active 角色、threadId、lease 和 state epoch 由 Harness 管理。每次 Stage2 命令完成后重新查询状态。只有 Unit 证据闭合后才能报告 COMPLETE，只有全部 Unit 完成后才能报告 BASELINE_READY。
 
 启动前快照仅用于发现明显漂移，磁盘查询结果拥有最终解释权：Stage1=${summary.status}，revision=${summary.revision}，nextAction=${nextAction}，nextDecision=${nextDecision}，Stage2=${stage2Snapshot}。
 现在执行启动动作并继续工作流。`;

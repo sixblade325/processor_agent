@@ -11,6 +11,8 @@ export interface LoadedSkill {
 }
 
 const TASK_SKILLS: Record<Stage2AgentTask, string[]> = {
+  topology_research: ["design-chisel-processor"],
+  topology_planning: ["design-chisel-processor"],
   shadow_design: ["design-chisel-processor"],
   active_implementation: ["design-chisel-processor", "implement-chisel-processor"],
   active_static_review: ["implement-chisel-processor"],

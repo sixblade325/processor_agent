@@ -348,7 +348,8 @@ export interface ReviewCorrectionChange {
   nextValue: unknown;
 }
 
-export interface ReviewCorrectionRecord {
+export interface ReviewCorrectionRecordV1 {
+  schemaVersion?: 1;
   id: string;
   findingCodes: string[];
   repairKind: "project_spec";
@@ -364,6 +365,133 @@ export interface ReviewCorrectionRecord {
   verifiedByAuditAggregateSha256?: string;
 }
 
+export type ProjectSpecDomainPatch =
+  | {
+      target: ProjectSpecTarget;
+      kind: "replace";
+      beforeSha256: string;
+      afterSha256: string;
+      value: unknown;
+    }
+  | {
+      target: ProjectSpecTarget;
+      kind: "string_array";
+      beforeSha256: string;
+      afterSha256: string;
+      add: string[];
+      remove: string[];
+      order: string[];
+    }
+  | {
+      target: ProjectSpecTarget;
+      kind: "keyed_collection";
+      keyField: "id" | "name" | "decisionId";
+      beforeSha256: string;
+      afterSha256: string;
+      add: Array<Record<string, unknown>>;
+      remove: string[];
+      update: Array<{
+        key: string;
+        fields: Record<string, unknown>;
+        removeFields: string[];
+      }>;
+      order: string[];
+    };
+
+export interface ProjectSpecHistoryBaseline {
+  profileDigest: string;
+  projectSpecSha256: string;
+  value: Stage1ProjectSpec;
+}
+
+export interface ProjectSpecHistoryEvent {
+  id: string;
+  kind: "review_correction" | "profile_refresh" | "override_release";
+  revision: number;
+  at: string;
+  beforeSha256: string;
+  afterSha256: string;
+  patches: ProjectSpecDomainPatch[];
+  correctionId?: string;
+  fromProfileDigest?: string;
+  toProfileDigest?: string;
+  releasedTarget?: ProjectSpecTarget;
+}
+
+export interface ProjectSpecHistory {
+  protocolVersion: 2;
+  baseline: ProjectSpecHistoryBaseline;
+  events: ProjectSpecHistoryEvent[];
+}
+
+export interface ProjectSpecHistoryStorage {
+  protocolVersion: 2;
+  path: string;
+  sha256: string;
+  eventCount: number;
+  compressedBytes: number;
+  uncompressedBytes: number;
+}
+
+export type ReviewCorrectionEvidenceKind =
+  | "decision"
+  | "project_document"
+  | "research"
+  | "profile"
+  | "user_directive"
+  | "external";
+
+export interface ReviewCorrectionEvidenceSource {
+  id: string;
+  kind: ReviewCorrectionEvidenceKind;
+  locator: string;
+  claim: string;
+  locations: string[];
+  revision?: number;
+  digest?: string;
+  fingerprint?: string;
+}
+
+export interface ReviewCorrectionFindingSource {
+  reportPath: string;
+  reviewedAggregateSha256: string;
+  findingCodes: string[];
+}
+
+export interface ReviewCorrectionRecordV2 {
+  schemaVersion: 2;
+  id: string;
+  findingCodes: string[];
+  repairKind: "project_spec";
+  changedTargets: ProjectSpecTarget[];
+  requiredClosure: string[];
+  eventId: string;
+  rationale: string;
+  findingSource: ReviewCorrectionFindingSource;
+  evidenceSources: ReviewCorrectionEvidenceSource[];
+  evidenceCoverage: Partial<Record<ProjectSpecTarget, string[]>>;
+  confirmedAt: string;
+  appliedAt: string;
+  status: "applied" | "verified" | "legacy_unresolved";
+  legacy: boolean;
+  verifiedByAuditAggregateSha256?: string;
+}
+
+export type ReviewCorrectionRecord = ReviewCorrectionRecordV1 | ReviewCorrectionRecordV2;
+
+export interface Stage1ArchitectureReworkLink {
+  id: string;
+  status: "active" | "reapproved";
+  sourceStage2Revision: number;
+  previousStatus: Stage1Status;
+  previousApprovalSha256: string;
+  repairKind: "decision" | "project_spec";
+  repairTarget: string;
+  startedAt: string;
+  reapprovedAt?: string;
+  newApprovalSha256?: string;
+}
+
 export interface ScaffoldRecord {
   createdAt: string;
   fileHashes: Record<string, string>;
@@ -377,7 +505,15 @@ export interface HistoryEvent {
   detail?: string;
 }
 
-export type Stage2Status = "MODULE_LOOP" | "BASELINE_READY" | "BLOCKED" | "CANCELLED";
+export type Stage2Status =
+  | "TOPOLOGY_DISCOVERY"
+  | "TOPOLOGY_DECISION_LOOP"
+  | "TOPOLOGY_REVIEW"
+  | "TOPOLOGY_APPROVED"
+  | "MODULE_LOOP"
+  | "BASELINE_READY"
+  | "BLOCKED"
+  | "CANCELLED";
 
 export type Stage2ModuleStatus =
   | "PENDING"
@@ -394,9 +530,11 @@ export type Stage2VerificationMode = "independent_workers" | "active_only";
 
 export type Stage2AgentSlot = "A" | "B";
 
-export type Stage2AgentRole = "shadow" | "active" | "idle";
+export type Stage2AgentRole = "planner" | "shadow" | "active" | "idle";
 
 export type Stage2AgentTask =
+  | "topology_research"
+  | "topology_planning"
   | "shadow_design"
   | "active_implementation"
   | "active_static_review"
@@ -407,6 +545,222 @@ export type Stage2AgentTask =
 export interface Stage2SkillReference {
   id: string;
   contentHash: string;
+}
+
+export type Stage2TopologyDecisionKind =
+  | "unit_mapping"
+  | "shared_ownership"
+  | "interface_ownership"
+  | "source_topology"
+  | "unit_dag"
+  | "completion";
+
+export type Stage2TopologyDecisionStatus = "pending" | "proposed" | "answered";
+
+export interface Stage2TopologyDecisionSpec {
+  id: string;
+  kind: Stage2TopologyDecisionKind;
+  topic: string;
+  question: string;
+  whyNow: string;
+  blocking: boolean;
+  researchPolicy: ResearchPolicy;
+  dependsOn: string[];
+}
+
+export interface Stage2ImplementationUnitPlan {
+  id: string;
+  kind: "architecture" | "shared";
+  architectureModules: string[];
+  responsibility: string;
+  rationale: string;
+  packageName: string;
+  designPath: string;
+  sourcePaths: string[];
+  testPaths: string[];
+  integrationPaths: string[];
+  dependsOn: string[];
+  wave: number | null;
+  integrationConsumers: string[];
+  completionCriteria: string[];
+  verificationResponsibility: string;
+}
+
+export interface Stage2SharedArtifactPlan {
+  id: string;
+  kind: "bundle" | "payload" | "config" | "utility" | "integration" | "other";
+  ownerUnit: string;
+  consumerUnits: string[];
+  sourcePaths: string[];
+  rationale: string;
+}
+
+export interface Stage2InterfaceContractPlan {
+  id: string;
+  ownerUnit: string;
+  producerUnits: string[];
+  consumerUnits: string[];
+  fields: string[];
+  boundary: string;
+  timing: string;
+}
+
+export interface Stage2ImplementationPlan {
+  units: Stage2ImplementationUnitPlan[];
+  sharedArtifacts: Stage2SharedArtifactPlan[];
+  interfaces: Stage2InterfaceContractPlan[];
+}
+
+export type Stage2TopologyPlanPatch =
+  | {
+      kind: "unit_mapping";
+      units: Array<Pick<
+        Stage2ImplementationUnitPlan,
+        "id" | "kind" | "architectureModules" | "responsibility" | "rationale"
+      >>;
+    }
+  | {
+      kind: "shared_ownership";
+      sharedArtifacts: Stage2SharedArtifactPlan[];
+    }
+  | {
+      kind: "interface_ownership";
+      interfaces: Stage2InterfaceContractPlan[];
+    }
+  | {
+      kind: "source_topology";
+      units: Array<Pick<
+        Stage2ImplementationUnitPlan,
+        "id" | "packageName" | "designPath" | "sourcePaths" | "testPaths" | "integrationPaths"
+      >>;
+    }
+  | {
+      kind: "unit_dag";
+      units: Array<Pick<Stage2ImplementationUnitPlan, "id" | "dependsOn" | "integrationConsumers">>;
+    }
+  | {
+      kind: "completion";
+      units: Array<Pick<
+        Stage2ImplementationUnitPlan,
+        "id" | "completionCriteria" | "verificationResponsibility"
+      >>;
+    };
+
+export interface Stage2TopologyOption {
+  id: string;
+  label: string;
+  summary: string;
+  benefits: string[];
+  costs: string[];
+  risks: string[];
+  notChoosingConsequences: string[];
+  affectedUnits: string[];
+  affectedInterfaces: string[];
+  affectedSourcePaths: string[];
+  affectedDagEdges: string[];
+  patch: Stage2TopologyPlanPatch;
+}
+
+export interface Stage2TopologyResearchEvidence {
+  schemaVersion: 1;
+  decisionId: string;
+  sources: ResearchSourceEvidence[];
+  facts: ResearchFact[];
+  conflicts: string[];
+  gaps: string[];
+  evidenceSufficient: boolean;
+  stopReason: string;
+}
+
+export interface Stage2TopologyEvidenceRecord extends Stage2TopologyResearchEvidence {
+  completedAt: string;
+  runId: string;
+  threadId?: string;
+  contextFingerprint: string;
+}
+
+export interface Stage2TopologyProposal {
+  schemaVersion: 1;
+  decisionId: string;
+  kind: Stage2TopologyDecisionKind;
+  summary: string;
+  architectureFacts: string[];
+  sourceEvidence: string[];
+  unknowns: string[];
+  options: Stage2TopologyOption[];
+  recommendation: string;
+  rationale: string[];
+  openQuestions: string[];
+  affectedDecisions: string[];
+  userConclusion: string | null;
+}
+
+export interface Stage2TopologyDecisionResolution {
+  selectedOption: string;
+  conclusion: string;
+  note?: string;
+  userCustomAnswer?: string;
+  answeredAt: string;
+  revision: number;
+  patch: Stage2TopologyPlanPatch;
+  planDocumentSha256: string;
+}
+
+export interface Stage2TopologyDecisionRevision {
+  at: string;
+  reason: string;
+  previousConclusion: string;
+  previousPlanDocumentSha256: string;
+  previousPatch?: Stage2TopologyPlanPatch;
+}
+
+export interface Stage2TopologyDecisionState {
+  spec: Stage2TopologyDecisionSpec;
+  status: Stage2TopologyDecisionStatus;
+  proposal?: Stage2TopologyProposal;
+  evidence?: Stage2TopologyEvidenceRecord;
+  resolution?: Stage2TopologyDecisionResolution;
+  revisions: Stage2TopologyDecisionRevision[];
+}
+
+export interface Stage2TopologyReview {
+  reviewedAt: string;
+  planRevision: number;
+  planDocumentSha256: string;
+  verdict: "pass" | "fail";
+  issues: string[];
+}
+
+export interface Stage2TopologyApproval {
+  approvedAt: string;
+  planRevision: number;
+  planDocumentSha256: string;
+  architectureHashes: Record<string, string>;
+}
+
+export interface Stage2LegacyMigrationRecord {
+  migratedAt: string;
+  sourceRevision: number;
+  sourceStateEpoch: number;
+  draftIndexes: Array<{
+    moduleId: string;
+    designPath: string;
+    designSha256: string;
+    runId: string;
+    threadId: string;
+  }>;
+}
+
+export interface Stage2TopologyState {
+  planPath: "design/plan.md";
+  planRevision: number;
+  planDocumentSha256: string;
+  decisionOrder: string[];
+  decisions: Record<string, Stage2TopologyDecisionState>;
+  plan: Stage2ImplementationPlan;
+  review?: Stage2TopologyReview;
+  approval?: Stage2TopologyApproval;
+  migration?: Stage2LegacyMigrationRecord;
 }
 
 export interface Stage2DesignField {
@@ -576,6 +930,7 @@ export interface Stage2AgentAssignment {
   lease: string;
   observedEpoch: number;
   moduleId?: string;
+  decisionId?: string;
   threadId?: string;
 }
 
@@ -588,9 +943,66 @@ export interface Stage2HistoryEvent {
   detail?: string;
 }
 
-export interface Stage2ProjectStage {
+export type Stage2ArchitectureReworkSourceKind =
+  | "topology"
+  | "unit_design"
+  | "implementation"
+  | "verification"
+  | "user";
+
+export interface Stage2ArchitectureReworkProposal {
+  summary: string;
+  rationale: string;
+  source: {
+    kind: Stage2ArchitectureReworkSourceKind;
+    decisionId?: string;
+    unitId?: string;
+  };
+  repair: {
+    kind: "decision" | "project_spec";
+    target: string;
+  };
+  requiredClosure: string[];
+  evidenceSources: ReviewCorrectionEvidenceSource[];
+  affectedTopologyDecisions: string[];
+  affectedUnits: string[];
+}
+
+export interface Stage2InvalidatedArtifactIndex {
+  unitId: string;
+  designSha256?: string;
+  implementationSha256?: string;
+  verificationSha256?: string;
+}
+
+export interface Stage2ArchitectureReworkRecord extends Stage2ArchitectureReworkProposal {
+  id: string;
+  status: "stage1_rework" | "stage1_reapproved" | "topology_rework" | "resumed";
+  startedAt: string;
+  updatedAt: string;
+  baseline: {
+    stage1ApprovalSha256: string;
+    stage2Revision: number;
+    stage2Status: Stage2Status;
+    planRevision: number;
+    planApprovalSha256?: string;
+    unitPlanHashes: Record<string, string>;
+  };
+  invalidatedArtifacts: Stage2InvalidatedArtifactIndex[];
+  suspendedAssignments: Array<{
+    slot: Stage2AgentSlot;
+    role: "shadow" | "active";
+    moduleId: string;
+    moduleStatus: Stage2ModuleStatus;
+    threadId?: string;
+  }>;
+  newStage1ApprovalSha256?: string;
+  resumedAt?: string;
+}
+
+export interface Stage2LegacyProjectStage {
   schemaVersion: 1;
-  status: Stage2Status;
+  status: "MODULE_LOOP" | "BASELINE_READY" | "BLOCKED" | "CANCELLED";
   revision: number;
   stateEpoch: number;
   initializedAt: string;
@@ -602,14 +1014,45 @@ export interface Stage2ProjectStage {
   history: Stage2HistoryEvent[];
 }
 
+export interface Stage2ProjectStage {
+  schemaVersion: 2;
+  status: Stage2Status;
+  revision: number;
+  stateEpoch: number;
+  initializedAt: string;
+  updatedAt: string;
+  topology: Stage2TopologyState;
+  moduleOrder: string[];
+  modules: Record<string, Stage2ModuleState>;
+  agents: Record<Stage2AgentSlot, Stage2AgentAssignment>;
+  architectureRework?: Stage2ArchitectureReworkRecord;
+  architectureReworkHistory?: Stage2ArchitectureReworkRecord[];
+  blockers: string[];
+  history: Stage2HistoryEvent[];
+}
+
 export interface Stage2TaskEnvelope {
-  schemaVersion: 1;
+  schemaVersion: 2;
   task: Stage2AgentTask;
   project: {
     name: string;
     root: string;
   };
-  module: ModuleSpec;
+  module?: ModuleSpec;
+  unit?: Stage2ImplementationUnitPlan;
+  topology?: {
+    decision: Stage2TopologyDecisionSpec;
+    architectureModules: ModuleSpec[];
+    confirmedDecisions: Array<{
+      id: string;
+      conclusion: string;
+    }>;
+    plan: Stage2ImplementationPlan;
+    planRevision: number;
+    planPath: string;
+    planDocumentSha256: string;
+    evidence?: Stage2TopologyEvidenceRecord;
+  };
   assignment: {
     slot: Stage2AgentSlot;
     role: Stage2AgentRole;
@@ -619,6 +1062,8 @@ export interface Stage2TaskEnvelope {
   authority: {
     repositoryRules: string;
     architectureHashes: Record<string, string>;
+    planPath?: string;
+    planSha256?: string;
     designPath?: string;
     designSha256?: string;
   };
@@ -630,6 +1075,42 @@ export interface Stage2TaskEnvelope {
 }
 
 export type Stage2NextAction =
+  | {
+      kind: "architecture_rework_stage1";
+      reworkId: string;
+      repairKind: "decision" | "project_spec";
+      repairTarget: string;
+    }
+  | {
+      kind: "architecture_rework_resume";
+      reworkId: string;
+    }
+  | {
+      kind: "topology_planning";
+      decisionId: string;
+      topic: string;
+      slot: Stage2AgentSlot;
+      researchPolicy: ResearchPolicy;
+    }
+  | {
+      kind: "topology_decision";
+      decision: Stage2TopologyDecisionSpec;
+      proposal: Stage2TopologyProposal;
+      planPath: string;
+      planRevision: number;
+    }
+  | {
+      kind: "topology_review";
+      planPath: string;
+      planRevision: number;
+      issues: string[];
+    }
+  | {
+      kind: "topology_approval";
+      planPath: string;
+      planRevision: number;
+      planDocumentSha256: string;
+    }
   | {
       kind: "shadow_design";
       moduleId: string;
@@ -686,6 +1167,32 @@ export interface Stage2Summary {
   shadow?: Stage2AgentAssignment;
   readyActions: Stage2NextAction[];
   blockers: string[];
+  plan: {
+    path: string;
+    revision: number;
+    status: Stage2Status;
+    answeredDecisions: number;
+    totalDecisions: number;
+    currentDecisionId?: string;
+    approvalCurrent: boolean;
+  };
+  board: Array<{
+    unitId: string;
+    architectureModules: string[];
+    dependsOn: string[];
+    wave: number | null;
+    status: Stage2ModuleStatus | "PLANNED";
+    agentRole: Stage2AgentRole;
+    designRevision?: number;
+    designPath: string;
+    sourcePaths: string[];
+    testPaths: string[];
+    verificationStatus: "not_started" | "primary_pending" | "review_pending" | "complete";
+    blockers: string[];
+  }>;
+  currentUserGate?: string;
+  nextMachineActions: string[];
+  architectureRework?: Stage2ArchitectureReworkRecord;
 }
 
 export interface Stage1ProjectState {
@@ -710,16 +1217,22 @@ export interface Stage1ProjectState {
     decisions: Record<string, DecisionState>;
     environment: CommandResult[];
     projectSpec?: Stage1ProjectSpec;
+    projectSpecHistory?: ProjectSpecHistory;
+    projectSpecHistoryStorage?: ProjectSpecHistoryStorage;
+    overriddenTargets?: ProjectSpecTarget[];
     generatedDocumentHashes: Record<string, string>;
     review?: ArchitectureReviewRecord;
     reviewHistory?: ArchitectureReviewRecord[];
     reviewCorrections?: ReviewCorrectionRecord[];
     approval?: ApprovalRecord;
+    approvalHistory?: ApprovalRecord[];
+    architectureRework?: Stage1ArchitectureReworkLink;
+    architectureReworkHistory?: Stage1ArchitectureReworkLink[];
     scaffold?: ScaffoldRecord;
     blockers: string[];
     history: HistoryEvent[];
   };
-  stage2?: Stage2ProjectStage;
+  stage2?: Stage2ProjectStage | Stage2LegacyProjectStage;
 }
 
 export interface InitOptions {
@@ -743,6 +1256,10 @@ export interface Stage1Summary {
   nextAction?: Stage1NextAction;
   blockers: string[];
   approvalCurrent: boolean;
+  projectSpecProtocolVersion: 1 | 2;
+  projectSpecHistoryEvents: number;
+  legacyUnresolvedCorrections: number;
+  architectureRework?: Stage1ArchitectureReworkLink;
 }
 
 export type Stage1NextAction =

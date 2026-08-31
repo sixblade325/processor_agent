@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { cp, mkdir, readFile, readdir } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { atomicWriteText, pathExists, readText } from "./io.js";
 import type { Stage2AgentTask } from "./types.js";
 
@@ -57,6 +58,7 @@ export async function createStage2RunDirectory(
 export function buildStage2CodexArguments(call: Stage2AgentCall): string[] {
   const outputPath = resolve(call.runtimeRoot, "result.json");
   const schemaPath = resolve(call.runtimeRoot, "schema.json");
+  const projectReaderArgs = stage2ProjectReaderArguments(call.projectRoot);
   if (call.sessionId !== undefined) {
     return [
       "exec",
@@ -65,6 +67,7 @@ export function buildStage2CodexArguments(call: Stage2AgentCall): string[] {
       "--ignore-rules",
       "--json",
       "--skip-git-repo-check",
+      ...projectReaderArgs,
       "--output-schema",
       schemaPath,
       "-o",
@@ -85,11 +88,22 @@ export function buildStage2CodexArguments(call: Stage2AgentCall): string[] {
     call.sandbox,
     "-C",
     call.projectRoot,
+    ...projectReaderArgs,
     "--output-schema",
     schemaPath,
     "-o",
     outputPath,
     "-",
+  ];
+}
+
+function stage2ProjectReaderArguments(projectRoot: string): string[] {
+  const serverPath = fileURLToPath(new URL("./project-reader-mcp.js", import.meta.url));
+  return [
+    "-c",
+    `mcp_servers.processor_project.command=${JSON.stringify(process.execPath)}`,
+    "-c",
+    `mcp_servers.processor_project.args=${JSON.stringify([serverPath, resolve(projectRoot)])}`,
   ];
 }
 

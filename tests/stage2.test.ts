@@ -11,24 +11,36 @@ import {
   type Stage2AgentExecutor,
 } from "../src/stage2-runtime.js";
 import {
+  answerCustomDecision,
   answerDecision,
+  applyReviewCorrection,
   approveStage1,
   completeStage1,
   currentGeneratedAggregate,
   initStage1,
+  loadStage1,
   reviewStage1,
   saveArchitectureReview,
+  saveProjectState,
   scaffoldStage1,
 } from "../src/stage1.js";
 import {
+  answerTopologyDecision,
   approveModuleDesign,
+  approveTopologyPlan,
   getReadyStage2Actions,
   initStage2,
   loadStage2,
+  migrateLegacyStage2,
   reopenModuleDesign,
+  reopenTopologyDecision,
+  reviewTopologyPlan,
   runActiveImplementation,
   runModuleVerification,
   runShadowDesign,
+  runTopologyPlanning,
+  startStage2ArchitectureRework,
+  resumeStage2ArchitectureRework,
   summarizeStage2,
 } from "../src/stage2.js";
 import type {
@@ -36,21 +48,247 @@ import type {
   CommandSpec,
   Stage2DesignProposal,
   Stage2ImplementationProposal,
+  Stage2LegacyProjectStage,
   Stage2ReviewReport,
+  Stage2TaskEnvelope,
+  Stage2TopologyPlanPatch,
+  Stage2TopologyProposal,
 } from "../src/types.js";
+
+test("Stage2 exposes one researched Topology Decision and projects the partial Unit board", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile", "fetch"]);
+  const calls: string[] = [];
+  const executor = fixtureExecutor(calls);
+  await initStage2(fixture.project);
+
+  await runTopologyPlanning(fixture.project, "S2_TOP_001", undefined, { executor });
+  let loaded = await loadStage2(fixture.project);
+  const decisionAction = getReadyStage2Actions(loaded.state);
+  assert.equal(decisionAction.length, 1);
+  assert.equal(decisionAction[0]?.kind, "topology_decision");
+  assert.deepEqual(calls, ["topology_research", "topology_planning"]);
+  assert.equal(loaded.state.stage2.topology.decisions.S2_TOP_001?.evidence?.evidenceSufficient, true);
+  const projectedPlan = await readFile(join(fixture.project, "design", "plan.md"), "utf8");
+  assert.match(projectedPlan, /S2_TOP_001/u);
+  assert.match(projectedPlan, /### Option `recommended`（推荐）/u);
+  assert.match(projectedPlan, /\| `regfile` \| architecture \| regfile \|/u);
+
+  await answerTopologyDecision(fixture.project, "S2_TOP_001", "recommended");
+  loaded = await loadStage2(fixture.project);
+  const summary = await summarizeStage2(loaded);
+  assert.equal(summary.plan.answeredDecisions, 1);
+  assert.deepEqual(summary.board.map((row) => row.unitId), ["regfile", "fetch"]);
+  assert.ok(summary.board.every((row) => row.status === "PLANNED"));
+  assert.equal(getReadyStage2Actions(loaded.state)[0]?.kind, "topology_planning");
+  assert.equal(loaded.state.stage2.agents.A.decisionId, "S2_TOP_002");
+});
+
+test("Stage2 refreshes Topology Research and passes the user focus only as a research hint", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile"]);
+  const calls: string[] = [];
+  const base = fixtureExecutor(calls);
+  const researchPrompts: string[] = [];
+  const executor: Stage2AgentExecutor = async (call) => {
+    if (call.task === "topology_research") {
+      researchPrompts.push(call.prompt);
+    }
+    return base(call);
+  };
+  await initStage2(fixture.project);
+
+  await runTopologyPlanning(
+    fixture.project,
+    "S2_TOP_001",
+    "优先检查状态 owner 和既定寄存边界。",
+    { executor },
+  );
+  await runTopologyPlanning(
+    fixture.project,
+    "S2_TOP_001",
+    "重新核对现有源码边界。",
+    { executor, refreshResearch: true },
+  );
+
+  assert.deepEqual(calls, [
+    "topology_research",
+    "topology_planning",
+    "topology_research",
+    "topology_planning",
+  ]);
+  assert.match(researchPrompts[0] ?? "", /优先检查状态 owner 和既定寄存边界/u);
+  assert.match(researchPrompts[1] ?? "", /重新核对现有源码边界/u);
+  assert.match(researchPrompts[1] ?? "", /不能作为已确认事实或拓扑结论/u);
+});
+
+test("Stage2 rejects a Planner-authored user conclusion", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile"]);
+  const base = fixtureExecutor([]);
+  await initStage2(fixture.project);
+  const executor: Stage2AgentExecutor = async (call) => {
+    const response = await base(call);
+    if (call.task !== "topology_planning") {
+      return response;
+    }
+    const proposal = structuredClone(response.output) as Stage2TopologyProposal;
+    proposal.userConclusion = "由 Planner 代替用户确认。";
+    return { ...response, output: proposal };
+  };
+
+  await assert.rejects(
+    runTopologyPlanning(fixture.project, "S2_TOP_001", undefined, { executor }),
+    /userConclusion=null/u,
+  );
+  const loaded = await loadStage2(fixture.project);
+  assert.equal(loaded.state.stage2.topology.decisions.S2_TOP_001?.status, "pending");
+});
+
+test("Stage2 Topology reopen preserves revision baselines and invalidates transitive dependents", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile", "fetch"]);
+  const executor = fixtureExecutor([]);
+  await initStage2(fixture.project);
+  await closeTopologyDecisions(fixture.project, executor, 3);
+
+  let loaded = await loadStage2(fixture.project);
+  assert.equal(loaded.state.stage2.topology.decisions.S2_TOP_003?.status, "answered");
+  await reopenTopologyDecision(fixture.project, "S2_TOP_001", "Unit 边界需要重新讨论。");
+  loaded = await loadStage2(fixture.project);
+  assert.equal(loaded.state.stage2.topology.decisions.S2_TOP_001?.status, "pending");
+  assert.equal(loaded.state.stage2.topology.decisions.S2_TOP_002?.status, "pending");
+  assert.equal(loaded.state.stage2.topology.decisions.S2_TOP_003?.status, "pending");
+  assert.equal(loaded.state.stage2.topology.decisions.S2_TOP_002?.revisions.length, 1);
+  assert.match(
+    loaded.state.stage2.topology.decisions.S2_TOP_002?.revisions[0]?.previousConclusion ?? "",
+    /闭合/u,
+  );
+  assert.deepEqual(loaded.state.stage2.topology.plan.units, []);
+  assert.equal(getReadyStage2Actions(loaded.state)[0]?.kind, "topology_planning");
+});
+
+test("Stage2 rejects a cyclic Implementation Unit DAG before user submission", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile", "fetch"]);
+  const base = fixtureExecutor([]);
+  await initStage2(fixture.project);
+  await closeTopologyDecisions(fixture.project, base, 4);
+  const cyclic: Stage2AgentExecutor = async (call) => {
+    const response = await base(call);
+    if (call.task !== "topology_planning") {
+      return response;
+    }
+    const proposal = structuredClone(response.output) as Stage2TopologyProposal;
+    const patch: Stage2TopologyPlanPatch = {
+      kind: "unit_dag",
+      units: [
+        { id: "regfile", dependsOn: ["fetch"], integrationConsumers: ["fetch"] },
+        { id: "fetch", dependsOn: ["regfile"], integrationConsumers: ["regfile"] },
+      ],
+    };
+    for (const option of proposal.options) {
+      option.patch = structuredClone(patch);
+    }
+    return { ...response, output: proposal };
+  };
+  await assert.rejects(
+    runTopologyPlanning(fixture.project, "S2_TOP_005", undefined, { executor: cyclic }),
+    /DAG contains a cycle/u,
+  );
+  const loaded = await loadStage2(fixture.project);
+  assert.equal(loaded.state.stage2.topology.decisions.S2_TOP_005?.status, "pending");
+});
+
+test("Stage2 blocks a required Topology Decision when Research evidence is insufficient", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile"]);
+  await initStage2(fixture.project);
+  const executor: Stage2AgentExecutor = async (call) => {
+    assert.equal(call.task, "topology_research");
+    return {
+      output: {
+        schemaVersion: 1,
+        decisionId: "S2_TOP_001",
+        sources: [],
+        facts: [],
+        conflicts: [],
+        gaps: ["现有源码尚未提供。"],
+        evidenceSufficient: false,
+        stopReason: "缺少可复查证据。",
+      },
+      events: "",
+      threadId: "research-insufficient",
+    };
+  };
+  await assert.rejects(
+    runTopologyPlanning(fixture.project, "S2_TOP_001", undefined, { executor }),
+    /evidence is insufficient/u,
+  );
+  const loaded = await loadStage2(fixture.project);
+  assert.equal(loaded.state.stage2.topology.decisions.S2_TOP_001?.status, "pending");
+  assert.equal(loaded.state.stage2.topology.decisions.S2_TOP_001?.evidence?.evidenceSufficient, false);
+  assert.match(loaded.state.stage2.blockers.join("\n"), /现有源码尚未提供/u);
+});
+
+test("Stage2 explicitly migrates an artifact-free legacy Module Loop", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile"]);
+  const loaded = await loadStage1(fixture.project);
+  const architecture = loaded.state.stage1.projectSpec?.architecture.modules[0];
+  assert.ok(architecture !== undefined);
+  const legacy: Stage2LegacyProjectStage = {
+    schemaVersion: 1,
+    status: "MODULE_LOOP",
+    revision: 7,
+    stateEpoch: 3,
+    initializedAt: "2026-08-30T00:00:00.000Z",
+    updatedAt: "2026-08-30T00:00:00.000Z",
+    moduleOrder: ["regfile"],
+    modules: {
+      regfile: {
+        id: "regfile",
+        order: 0,
+        status: "PENDING",
+        architecture,
+        blockers: [],
+        reopened: [],
+      },
+    },
+    agents: {
+      A: { slot: "A", role: "idle", status: "idle", lease: "legacy-a", observedEpoch: 3 },
+      B: { slot: "B", role: "idle", status: "idle", lease: "legacy-b", observedEpoch: 3 },
+    },
+    blockers: [],
+    history: [],
+  };
+  loaded.state.stage2 = legacy;
+  await saveProjectState(loaded.root, loaded.state);
+
+  const migrated = await migrateLegacyStage2(fixture.project);
+  assert.equal(migrated.state.stage2.schemaVersion, 2);
+  assert.equal(migrated.state.stage2.status, "TOPOLOGY_DISCOVERY");
+  assert.equal(migrated.state.stage2.topology.migration?.sourceRevision, 7);
+  assert.equal(migrated.state.stage2.agents.A.role, "planner");
+  assert.equal(getReadyStage2Actions(migrated.state)[0]?.kind, "topology_planning");
+});
 
 test("Stage2 completes the regfile tracer and rotates persistent Agent roles", async () => {
   const fixture = await createCompletedStage1Fixture(["regfile", "fetch"]);
-  let loaded = await initStage2(fixture.project);
-  assert.equal(loaded.state.stage2.agents.A.role, "shadow");
-  assert.equal(loaded.state.stage2.agents.A.moduleId, "regfile");
-  assert.equal(loaded.state.stage2.agents.B.role, "idle");
-  assert.deepEqual(getReadyStage2Actions(loaded.state), [
-    { kind: "shadow_design", moduleId: "regfile", slot: "A" },
-  ]);
-
   const calls: string[] = [];
   const executor = fixtureExecutor(calls);
+  let loaded = await initStage2(fixture.project);
+  assert.equal(loaded.state.stage2.agents.A.role, "planner");
+  assert.equal(loaded.state.stage2.agents.A.decisionId, "S2_TOP_001");
+  assert.equal(loaded.state.stage2.agents.B.role, "idle");
+  assert.deepEqual(getReadyStage2Actions(loaded.state), [
+    {
+      kind: "topology_planning",
+      decisionId: "S2_TOP_001",
+      topic: "Implementation Unit 边界",
+      slot: "A",
+      researchPolicy: "required",
+    },
+  ]);
+  await completeFixtureTopology(fixture.project, executor);
+  loaded = await loadStage2(fixture.project);
+  assert.equal(loaded.state.stage2.agents.A.role, "shadow");
+  assert.equal(loaded.state.stage2.agents.A.moduleId, "regfile");
+  assert.equal(loaded.state.stage2.topology.approval?.planRevision, 6);
+
   await runShadowDesign(fixture.project, "regfile", undefined, { executor });
   loaded = await loadStage2(fixture.project);
   assert.equal(loaded.state.stage2.modules.regfile?.status, "AWAITING_APPROVAL");
@@ -122,7 +360,7 @@ test("Stage2 independent mode records two short-lived verification Workers", asy
   const fixture = await createCompletedStage1Fixture(["regfile"]);
   const calls: string[] = [];
   const executor = fixtureExecutor(calls);
-  await initStage2(fixture.project);
+  await initializeApprovedStage2(fixture.project, executor);
   await runShadowDesign(fixture.project, "regfile", undefined, { executor });
   await approveModuleDesign(fixture.project, "regfile", "independent_workers");
   await runActiveImplementation(fixture.project, "regfile", {
@@ -149,7 +387,7 @@ test("Stage2 independent mode records two short-lived verification Workers", asy
 
 test("Stage2 persists an incomplete Design and rejects approval until closure", async () => {
   const fixture = await createCompletedStage1Fixture(["regfile"]);
-  await initStage2(fixture.project);
+  await initializeApprovedStage2(fixture.project, fixtureExecutor([]));
   const executor: Stage2AgentExecutor = async (call) => {
     const proposal = designProposal("regfile");
     proposal.implementation.sourcePaths = [];
@@ -176,10 +414,10 @@ test("Stage2 persists an incomplete Design and rejects approval until closure", 
   );
 });
 
-test("Stage2 gives every source and test path one Module owner", async () => {
+test("Stage2 gives every source and test path one Unit owner", async () => {
   const fixture = await createCompletedStage1Fixture(["regfile", "fetch"]);
   const executor = fixtureExecutor([]);
-  await initStage2(fixture.project);
+  await initializeApprovedStage2(fixture.project, executor);
   await runShadowDesign(fixture.project, "regfile", undefined, { executor });
   await approveModuleDesign(fixture.project, "regfile", "active_only");
 
@@ -205,7 +443,7 @@ test("Stage2 gives every source and test path one Module owner", async () => {
 
 test("Stage2 rejects Design references that are not project files", async () => {
   const fixture = await createCompletedStage1Fixture(["regfile"]);
-  await initStage2(fixture.project);
+  await initializeApprovedStage2(fixture.project, fixtureExecutor([]));
   const executor: Stage2AgentExecutor = async () => {
     const proposal = designProposal("regfile");
     proposal.sourceReferences = ["src/main/scala/demo/Missing.scala"];
@@ -219,7 +457,7 @@ test("Stage2 rejects Design references that are not project files", async () => 
 
 test("Stage2 rejects a stale concurrent Shadow result for the same module", async () => {
   const fixture = await createCompletedStage1Fixture(["regfile"]);
-  await initStage2(fixture.project);
+  await initializeApprovedStage2(fixture.project, fixtureExecutor([]));
   const firstGate = deferred();
   const secondGate = deferred();
   const firstEntered = deferred();
@@ -262,7 +500,7 @@ test("Stage2 rejects protected input changes from an independent Verification Wo
     }
     return response;
   };
-  await initStage2(fixture.project);
+  await initializeApprovedStage2(fixture.project, executor);
   await runShadowDesign(fixture.project, "regfile", undefined, { executor });
   await approveModuleDesign(fixture.project, "regfile", "independent_workers");
   await runActiveImplementation(fixture.project, "regfile", {
@@ -284,7 +522,7 @@ test("Stage2 rejects protected input changes from an independent Verification Wo
 test("Stage2 rejects implementation paths outside the approved Design", async () => {
   const fixture = await createCompletedStage1Fixture(["regfile"]);
   const executor = fixtureExecutor([]);
-  await initStage2(fixture.project);
+  await initializeApprovedStage2(fixture.project, executor);
   await runShadowDesign(fixture.project, "regfile", undefined, { executor });
   await approveModuleDesign(fixture.project, "regfile", "active_only");
   const before = await readFile(join(fixture.project, "architecture", "overview.md"), "utf8");
@@ -327,7 +565,7 @@ test("Stage2 rejects implementation paths outside the approved Design", async ()
 test("Stage2 blocks approval on Design drift and supports explicit Design reopen", async () => {
   const fixture = await createCompletedStage1Fixture(["regfile"]);
   const executor = fixtureExecutor([]);
-  await initStage2(fixture.project);
+  await initializeApprovedStage2(fixture.project, executor);
   await runShadowDesign(fixture.project, "regfile", undefined, { executor });
   const designPath = join(fixture.project, "design", "regfile.md");
   await writeFile(designPath, `${await readFile(designPath, "utf8")}manual drift\n`, "utf8");
@@ -374,7 +612,7 @@ test("Stage2 blocks approval on Design drift and supports explicit Design reopen
 
 test("Stage2 CLI and Workspace prompt expose the Harness workflow", async () => {
   const fixture = await createCompletedStage1Fixture(["regfile"]);
-  await initStage2(fixture.project);
+  await initializeApprovedStage2(fixture.project, fixtureExecutor([]));
   const result = spawnSync(
     process.execPath,
     [resolve("dist", "src", "cli.js"), "stage2", "status", fixture.project, "--json"],
@@ -386,8 +624,9 @@ test("Stage2 CLI and Workspace prompt expose the Harness workflow", async () => 
 
   const prompt = await buildWorkspaceAgentPrompt(fixture.project);
   assert.match(prompt, /processor-agent stage2 status/u);
+  assert.match(prompt, /topology_decision/u);
   assert.match(prompt, /independent_workers/u);
-  assert.match(prompt, /不得继承上一模块选择/u);
+  assert.match(prompt, /不得继承上一 Unit 选择/u);
 });
 
 test("Stage2 Codex Runtime distinguishes persistent, resumed, and ephemeral sessions", () => {
@@ -406,6 +645,8 @@ test("Stage2 Codex Runtime distinguishes persistent, resumed, and ephemeral sess
   assert.equal(persistent.includes("--ignore-user-config"), true);
   assert.equal(persistent.includes("--ignore-rules"), true);
   assert.equal(persistent.includes("C:\\project"), true);
+  assert.match(persistent.join(" "), /mcp_servers\.processor_project\.command/u);
+  assert.match(persistent.join(" "), /project-reader-mcp\.js/u);
   const ephemeral = buildStage2CodexArguments({
     ...base,
     task: "independent_static_review",
@@ -417,7 +658,304 @@ test("Stage2 Codex Runtime distinguishes persistent, resumed, and ephemeral sess
   assert.equal(resumed.includes("--output-schema"), true);
   assert.equal(resumed.includes("--ignore-user-config"), true);
   assert.equal(resumed.includes("--ignore-rules"), true);
+  assert.match(resumed.join(" "), /mcp_servers\.processor_project\.command/u);
+  assert.match(resumed.join(" "), /project-reader-mcp\.js/u);
 });
+
+test("Stage2 Shadow prompt requires the Project Reader MCP", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile"]);
+  const delegate = fixtureExecutor([]);
+  await initializeApprovedStage2(fixture.project, delegate);
+  let prompt = "";
+  await runShadowDesign(fixture.project, "regfile", undefined, {
+    executor: async (call) => {
+      prompt = call.prompt;
+      return delegate(call);
+    },
+  });
+  assert.match(prompt, /processor_project MCP/u);
+  assert.match(prompt, /不得依赖 Shell、PowerShell、cmd/u);
+});
+
+test("Stage2 Decision rework freezes agents and resumes only after a new Stage1 approval", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile"]);
+  let loaded = await initStage2(fixture.project);
+  const originalEpoch = loaded.state.stage2.stateEpoch;
+  const originalApproval = loaded.state.stage1.approval?.aggregateSha256;
+
+  loaded = await startStage2ArchitectureRework(fixture.project, {
+    summary: "Stage2 发现 D1 没有闭合修订后的寄存器文件行为。",
+    rationale: "Topology 继续前必须重新批准 Architecture 结论。",
+    source: { kind: "user" },
+    repair: { kind: "decision", target: "D1" },
+    requiredClosure: ["重新确认 D1 的完整架构结论"],
+    evidenceSources: [architectureReworkUserEvidence("ARW_DECISION")],
+    affectedTopologyDecisions: ["S2_TOP_001"],
+    affectedUnits: [],
+  });
+  assert.equal(loaded.state.stage2.status, "BLOCKED");
+  assert.equal(loaded.state.stage1.status, "DECISION_LOOP");
+  assert.equal(loaded.state.stage1.approval, undefined);
+  assert.ok(loaded.state.stage2.stateEpoch > originalEpoch);
+  assert.ok(Object.values(loaded.state.stage2.agents).every((agent) => agent.role === "idle"));
+  assert.equal(getReadyStage2Actions(loaded.state)[0]?.kind, "architecture_rework_stage1");
+  await assert.rejects(
+    resumeStage2ArchitectureRework(fixture.project),
+    /has not been reapproved/u,
+  );
+
+  await reapproveStage1WithCustomDecision(
+    fixture.project,
+    "修订后的 D1 结论明确寄存器文件读写和同拍可见性。",
+  );
+  loaded = await loadStage2(fixture.project);
+  assert.equal(loaded.state.stage2.architectureRework?.status, "stage1_reapproved");
+  assert.notEqual(loaded.state.stage1.approval?.aggregateSha256, originalApproval);
+  assert.equal(getReadyStage2Actions(loaded.state)[0]?.kind, "architecture_rework_resume");
+
+  loaded = await resumeStage2ArchitectureRework(fixture.project);
+  assert.equal(loaded.state.stage2.status, "TOPOLOGY_DECISION_LOOP");
+  assert.equal(loaded.state.stage2.topology.decisions.S2_TOP_001?.status, "pending");
+  assert.equal(loaded.state.stage1.architectureRework, undefined);
+  assert.equal(loaded.state.stage1.architectureReworkHistory?.at(-1)?.status, "reapproved");
+  assert.equal(getReadyStage2Actions(loaded.state)[0]?.kind, "topology_planning");
+});
+
+test("Stage2 ProjectSpec rework uses Review Correction v2 before returning to Topology", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile"]);
+  await initStage2(fixture.project);
+  await startStage2ArchitectureRework(fixture.project, {
+    summary: "Stage2 发现缺少寄存器文件同拍写后读不变量。",
+    rationale: "该规则属于已批准 Architecture 的项目级不变量。",
+    source: { kind: "user" },
+    repair: { kind: "project_spec", target: "architecture.invariants" },
+    requiredClosure: ["补齐同拍写后读不变量及依据"],
+    evidenceSources: [architectureReworkUserEvidence("ARW_PROJECT_SPEC")],
+    affectedTopologyDecisions: ["S2_TOP_006"],
+    affectedUnits: [],
+  });
+  let stage1 = await loadStage1(fixture.project);
+  assert.equal(stage1.state.stage1.status, "REVIEW_CORRECTION");
+  assert.equal(stage1.state.stage1.review?.findings[0]?.code, "S2_ARW_001_PROJECT_SPEC");
+
+  await applyReviewCorrection(fixture.project, {
+    findingCodes: ["S2_ARW_001_PROJECT_SPEC"],
+    patch: {
+      architecture: {
+        invariants: ["In order", "同拍写后读返回本周期写入值。"],
+      },
+    },
+    rationale: "补齐 Stage2 暴露的 Architecture 不变量。",
+    evidenceSources: [architectureReworkUserEvidence("ARW_PROJECT_SPEC")],
+    evidenceCoverage: { "architecture.invariants": ["ARW_PROJECT_SPEC"] },
+  });
+  await reviewStage1(fixture.project);
+  await savePassingStage1Audit(fixture.project, "ProjectSpec Architecture Rework 已闭合。");
+  await approveStage1(fixture.project);
+
+  const loaded = await resumeStage2ArchitectureRework(fixture.project);
+  assert.deepEqual(loaded.state.stage1.projectSpec?.architecture.invariants, [
+    "In order",
+    "同拍写后读返回本周期写入值。",
+  ]);
+  assert.equal(loaded.state.stage1.reviewCorrections?.at(-1)?.schemaVersion, 2);
+  assert.equal(loaded.state.stage1.projectSpecHistory?.events.at(-1)?.kind, "review_correction");
+  assert.equal(loaded.state.stage2.architectureRework?.status, "topology_rework");
+  assert.equal(loaded.state.stage2.topology.decisions.S2_TOP_006?.status, "pending");
+});
+
+test("Stage2 rework invalidates affected Units and transitive consumers while preserving unrelated state", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile", "fetch", "alu"]);
+  const executor = fixtureExecutorWithRegfileConsumer([]);
+  await initializeApprovedStage2(fixture.project, executor);
+  await completeFixtureModules(fixture.project, executor);
+  let loaded = await loadStage2(fixture.project);
+  loaded.state.stage2.modules.alu!.reopened.push({
+    at: "2026-08-30T00:00:00.000Z",
+    reason: "unrelated-state-sentinel",
+  });
+  await saveProjectState(loaded.root, loaded.state);
+  const oldRegfileDesign = loaded.state.stage2.modules.regfile?.design?.documentSha256;
+
+  await startStage2ArchitectureRework(fixture.project, {
+    summary: "Regfile 接口契约需要返回 Stage1 修订。",
+    rationale: "Regfile 的实现证据证明既有 Architecture 结论不完整。",
+    source: { kind: "implementation", unitId: "regfile" },
+    repair: { kind: "decision", target: "D1" },
+    requiredClosure: ["补齐 Regfile 接口时序结论"],
+    evidenceSources: [architectureReworkUserEvidence("ARW_MATERIALIZED")],
+    affectedTopologyDecisions: ["S2_TOP_003"],
+    affectedUnits: ["regfile"],
+  });
+  await reapproveStage1WithCustomDecision(
+    fixture.project,
+    "修订后的 D1 结论补齐 Regfile 接口时序和同拍可见性。",
+  );
+  loaded = await resumeStage2ArchitectureRework(fixture.project);
+  assert.deepEqual(
+    loaded.state.stage2.architectureRework?.invalidatedArtifacts.map((item) => item.unitId).sort(),
+    ["fetch", "regfile"],
+  );
+  assert.equal(loaded.state.stage2.modules.regfile?.status, "NEEDS_REALIGN");
+  assert.equal(loaded.state.stage2.modules.fetch?.status, "NEEDS_REALIGN");
+  assert.equal(loaded.state.stage2.modules.regfile?.design?.approval, undefined);
+  assert.equal(loaded.state.stage2.modules.regfile?.implementation, undefined);
+  assert.equal(loaded.state.stage2.modules.regfile?.verification, undefined);
+  assert.equal(
+    loaded.state.stage2.modules.regfile?.reopened.at(-1)?.previousDesignSha256,
+    oldRegfileDesign,
+  );
+  assert.equal(
+    loaded.state.stage2.modules.alu?.reopened.at(-1)?.reason,
+    "unrelated-state-sentinel",
+  );
+
+  await completeFixtureTopology(fixture.project, executor);
+  loaded = await loadStage2(fixture.project);
+  assert.equal(loaded.state.stage2.architectureRework, undefined);
+  assert.equal(loaded.state.stage2.architectureReworkHistory?.at(-1)?.status, "resumed");
+  assert.equal(loaded.state.stage2.modules.regfile?.status, "DESIGNING");
+  assert.equal(loaded.state.stage2.modules.fetch?.status, "NEEDS_REALIGN");
+  assert.equal(loaded.state.stage2.modules.alu?.status, "COMPLETE");
+  assert.equal(
+    loaded.state.stage2.modules.alu?.reopened.at(-1)?.reason,
+    "unrelated-state-sentinel",
+  );
+});
+
+async function initializeApprovedStage2(
+  project: string,
+  executor: Stage2AgentExecutor,
+): Promise<void> {
+  await initStage2(project);
+  await completeFixtureTopology(project, executor);
+}
+
+async function closeTopologyDecisions(
+  project: string,
+  executor: Stage2AgentExecutor,
+  count: number,
+): Promise<void> {
+  for (let index = 0; index < count; index += 1) {
+    const loaded = await loadStage2(project);
+    const actions = getReadyStage2Actions(loaded.state);
+    const action = actions.find((candidate) => candidate.kind !== "waiting_for_rotation") ?? actions[0];
+    assert.equal(action?.kind, "topology_planning");
+    if (action?.kind !== "topology_planning") {
+      throw new Error("Expected a Topology planning action");
+    }
+    await runTopologyPlanning(project, action.decisionId, undefined, { executor });
+    const proposed = getReadyStage2Actions((await loadStage2(project)).state)[0];
+    assert.equal(proposed?.kind, "topology_decision");
+    if (proposed?.kind !== "topology_decision") {
+      throw new Error("Expected a Topology Decision action");
+    }
+    await answerTopologyDecision(
+      project,
+      proposed.decision.id,
+      proposed.proposal.recommendation,
+    );
+  }
+}
+
+async function completeFixtureTopology(
+  project: string,
+  executor: Stage2AgentExecutor,
+): Promise<void> {
+  for (;;) {
+    const loaded = await loadStage2(project);
+    const action = getReadyStage2Actions(loaded.state)[0];
+    if (action?.kind === "topology_planning") {
+      await runTopologyPlanning(project, action.decisionId, undefined, { executor });
+      continue;
+    }
+    if (action?.kind === "topology_decision") {
+      await answerTopologyDecision(
+        project,
+        action.decision.id,
+        action.proposal.recommendation,
+      );
+      continue;
+    }
+    if (action?.kind === "topology_review") {
+      assert.deepEqual(action.issues, []);
+      await reviewTopologyPlan(project);
+      continue;
+    }
+    if (action?.kind === "topology_approval") {
+      await approveTopologyPlan(project);
+      return;
+    }
+    throw new Error(`Unexpected Topology action: ${JSON.stringify(action)}`);
+  }
+}
+
+async function completeFixtureModules(
+  project: string,
+  executor: Stage2AgentExecutor,
+): Promise<void> {
+  for (let step = 0; step < 50; step += 1) {
+    const loaded = await loadStage2(project);
+    const action = getReadyStage2Actions(loaded.state)[0];
+    if (action?.kind === "shadow_design") {
+      await runShadowDesign(project, action.moduleId, undefined, { executor });
+      continue;
+    }
+    if (action?.kind === "design_approval") {
+      await approveModuleDesign(project, action.moduleId, "active_only");
+      continue;
+    }
+    if (action?.kind === "active_implementation") {
+      await runActiveImplementation(project, action.moduleId, {
+        executor,
+        commandRunner: passingCommandRunner,
+      });
+      continue;
+    }
+    if (action?.kind === "verification") {
+      await runModuleVerification(project, action.moduleId, {
+        executor,
+        commandRunner: passingCommandRunner,
+      });
+      continue;
+    }
+    if (action?.kind === "baseline_complete") {
+      return;
+    }
+    throw new Error(`Unexpected Module Loop action: ${JSON.stringify(action)}`);
+  }
+  throw new Error("Fixture Module Loop did not converge");
+}
+
+function architectureReworkUserEvidence(id: string) {
+  return {
+    id,
+    kind: "user_directive" as const,
+    locator: id,
+    claim: "用户确认 Stage2 暴露的 Architecture 缺口及其明确修订范围。",
+    locations: [],
+  };
+}
+
+async function savePassingStage1Audit(project: string, summary: string): Promise<void> {
+  const loaded = await loadStage1(project);
+  await saveArchitectureReview(project, {
+    reviewedAggregateSha256: currentGeneratedAggregate(loaded.state),
+    verdict: "pass",
+    summary,
+    findings: [],
+  });
+}
+
+async function reapproveStage1WithCustomDecision(
+  project: string,
+  conclusion: string,
+): Promise<void> {
+  await answerCustomDecision(project, "D1", conclusion);
+  await reviewStage1(project);
+  await savePassingStage1Audit(project, "Stage1 Architecture Rework 已闭合。");
+  await approveStage1(project);
+}
 
 async function createCompletedStage1Fixture(
   moduleOrder: string[],
@@ -520,6 +1058,49 @@ scaffold:
 function fixtureExecutor(calls: string[]): Stage2AgentExecutor {
   return async (call) => {
     calls.push(call.task);
+    if (call.task === "topology_research") {
+      const envelope = taskEnvelopeFromCall(call);
+      const decisionId = envelope.topology?.decision.id;
+      if (decisionId === undefined) {
+        throw new Error("Topology Research fixture is missing a Decision");
+      }
+      return {
+        output: {
+          schemaVersion: 1,
+          decisionId,
+          sources: [
+            {
+              kind: "project",
+              locator: "architecture/modules.yaml",
+              revision: "fixture",
+              accessedAt: "2026-08-30T00:00:00.000Z",
+              locations: ["architecture/modules.yaml:1"],
+            },
+          ],
+          facts: [
+            {
+              claim: `已读取 ${decisionId} 需要的项目架构事实。`,
+              source: "architecture/modules.yaml",
+              confidence: "high",
+            },
+          ],
+          conflicts: [],
+          gaps: [],
+          evidenceSufficient: true,
+          stopReason: "已获得当前 Decision 需要的项目证据。",
+        },
+        events: "",
+        threadId: `research-${decisionId}`,
+      };
+    }
+    if (call.task === "topology_planning") {
+      const envelope = taskEnvelopeFromCall(call);
+      return {
+        output: fixtureTopologyProposal(envelope),
+        events: "",
+        threadId: "thread-A",
+      };
+    }
     const moduleId = moduleIdFromCall(call);
     const slot = slotFromCall(call);
     if (call.task === "shadow_design") {
@@ -576,6 +1157,146 @@ function fixtureExecutor(calls: string[]): Stage2AgentExecutor {
         : `thread-${slot}`;
     return { output: report, events: "", threadId };
   };
+}
+
+function fixtureExecutorWithRegfileConsumer(calls: string[]): Stage2AgentExecutor {
+  const delegate = fixtureExecutor(calls);
+  return async (call) => {
+    const response = await delegate(call);
+    if (call.task !== "topology_planning") {
+      return response;
+    }
+    const proposal = response.output as Stage2TopologyProposal;
+    if (proposal.decisionId !== "S2_TOP_005") {
+      return response;
+    }
+    for (const option of proposal.options) {
+      if (option.patch.kind !== "unit_dag") {
+        continue;
+      }
+      for (const unit of option.patch.units) {
+        if (unit.id === "regfile") {
+          unit.integrationConsumers = ["fetch"];
+        } else if (unit.id === "fetch") {
+          unit.dependsOn = ["regfile"];
+        }
+      }
+    }
+    return response;
+  };
+}
+
+function fixtureTopologyProposal(envelope: Stage2TaskEnvelope): Stage2TopologyProposal {
+  const topology = envelope.topology;
+  if (topology === undefined) {
+    throw new Error("Topology fixture is missing its Task Envelope section");
+  }
+  const unitIds = topology.plan.units.map((unit) => unit.id);
+  let patch: Stage2TopologyPlanPatch;
+  switch (topology.decision.kind) {
+    case "unit_mapping":
+      patch = {
+        kind: "unit_mapping",
+        units: topology.architectureModules.map((module) => ({
+          id: module.id,
+          kind: "architecture",
+          architectureModules: [module.id],
+          responsibility: module.responsibility,
+          rationale: "Fixture 使用一对一 Unit 映射。",
+        })),
+      };
+      break;
+    case "shared_ownership":
+      patch = { kind: "shared_ownership", sharedArtifacts: [] };
+      break;
+    case "interface_ownership":
+      patch = {
+        kind: "interface_ownership",
+        interfaces: unitIds.map((unitId) => ({
+          id: `${unitId}_interface`,
+          ownerUnit: unitId,
+          producerUnits: [unitId],
+          consumerUnits: [unitId],
+          fields: [`${unitId}_state`],
+          boundary: `${unitId} Unit 边界。`,
+          timing: "周期边界稳定。",
+        })),
+      };
+      break;
+    case "source_topology":
+      patch = {
+        kind: "source_topology",
+        units: unitIds.map((unitId) => {
+          const className = capitalize(unitId);
+          return {
+            id: unitId,
+            packageName: "demo",
+            designPath: `design/${unitId}.md`,
+            sourcePaths: [`src/main/scala/demo/${className}.scala`],
+            testPaths: [`src/test/scala/demo/${className}Spec.scala`],
+            integrationPaths: [],
+          };
+        }),
+      };
+      break;
+    case "unit_dag":
+      patch = {
+        kind: "unit_dag",
+        units: unitIds.map((unitId) => ({
+          id: unitId,
+          dependsOn: [],
+          integrationConsumers: [],
+        })),
+      };
+      break;
+    case "completion":
+      patch = {
+        kind: "completion",
+        units: unitIds.map((unitId) => ({
+          id: unitId,
+          completionCriteria: ["Design、实现、定向测试和验证证据闭合。"],
+          verificationResponsibility: `${unitId} 定向与集成验证。`,
+        })),
+      };
+      break;
+  }
+  const option = {
+    id: "recommended",
+    label: "Fixture 推荐",
+    summary: `闭合 ${topology.decision.topic}。`,
+    benefits: ["结构确定。"],
+    costs: ["需要维护正式 Plan。"],
+    risks: [],
+    notChoosingConsequences: ["后续门禁无法启动。"],
+    affectedUnits: unitIds,
+    affectedInterfaces: [],
+    affectedSourcePaths: [],
+    affectedDagEdges: [],
+    patch,
+  };
+  return {
+    schemaVersion: 1,
+    decisionId: topology.decision.id,
+    kind: topology.decision.kind,
+    summary: `Fixture ${topology.decision.id} 候选。`,
+    architectureFacts: ["使用已批准 Architecture Module Manifest。"],
+    sourceEvidence: topology.evidence?.facts.map((fact) => fact.claim) ?? [],
+    unknowns: [],
+    options: [option, { ...structuredClone(option), id: "alternative", label: "Fixture 备选" }],
+    recommendation: "recommended",
+    rationale: ["适合确定性测试。"],
+    openQuestions: [],
+    affectedDecisions: [],
+    userConclusion: null,
+  };
+}
+
+function taskEnvelopeFromCall(call: Stage2AgentCall): Stage2TaskEnvelope {
+  const match = /Task Envelope：\r?\n([\s\S]*?)\r?\n\r?\n(?:Stage1 Architecture|Architecture Module|Approved Design|Module State)/u.exec(call.prompt);
+  if (match?.[1] === undefined) {
+    throw new Error(`No Task Envelope in ${call.task} prompt`);
+  }
+  return JSON.parse(match[1]) as Stage2TaskEnvelope;
 }
 
 function designProposal(moduleId: string): Stage2DesignProposal {

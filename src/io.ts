@@ -22,6 +22,10 @@ export function sha256(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
+export function sha256Bytes(content: Uint8Array): string {
+  return createHash("sha256").update(content).digest("hex");
+}
+
 export function assertSafeRelativePath(path: string): void {
   if (isAbsolute(path) || path === "" || path.split(/[\\/]+/u).includes("..")) {
     throw new Error(`Unsafe relative path: ${path}`);
@@ -43,6 +47,13 @@ export async function atomicWriteText(path: string, content: string): Promise<vo
   await mkdir(dirname(path), { recursive: true });
   const temporary = `${path}.tmp-${process.pid}-${Date.now()}`;
   await writeFile(temporary, content, "utf8");
+  await rename(temporary, path);
+}
+
+export async function atomicWriteBytes(path: string, content: Uint8Array): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.tmp-${process.pid}-${Date.now()}`;
+  await writeFile(temporary, content);
   await rename(temporary, path);
 }
 
