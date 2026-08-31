@@ -9,6 +9,7 @@ import {
   adviseDecision,
   buildWorkspaceAgentPrompt,
   isolatedCodexWorkerArguments,
+  normalizeArchitectureReviewFindingCodes,
   researchDecision,
   type StructuredWorkerExecutor,
 } from "../src/agent-runtime.js";
@@ -47,6 +48,7 @@ import {
   summarizeStage1,
 } from "../src/stage1.js";
 import type {
+  ArchitectureReviewFinding,
   DecisionAdvice,
   DecisionSynthesis,
   ResearchEvidence,
@@ -93,6 +95,50 @@ test("Project Reader MCP exposes bounded read-only project evidence", async () =
   );
 });
 
+test("Architecture audit normalizes duplicate or empty finding codes deterministically", () => {
+  const report = normalizeArchitectureReviewFindingCodes({
+    reviewedAggregateSha256: "aggregate",
+    verdict: "fail",
+    summary: "Fixture findings.",
+    findings: [
+      auditFinding("DUPLICATE"),
+      auditFinding("DUPLICATE"),
+      auditFinding(""),
+    ],
+  });
+  assert.deepEqual(
+    report.findings.map((finding) => finding.code),
+    ["DUPLICATE", "DUPLICATE_2", "ARCH_FINDING_003"],
+  );
+});
+
+test("A Decision fact can be audited from its Verification Plan projection", async () => {
+  const fixture = await createFixture();
+  await initStage1(fixture.project, fixture.profile);
+  await answerDecision(fixture.project, "D1", "a");
+  await answerDecision(fixture.project, "D2", "b");
+  await reviewStage1(fixture.project);
+  const loaded = await loadStage1(fixture.project);
+  await saveArchitectureReview(fixture.project, {
+    reviewedAggregateSha256: currentGeneratedAggregate(loaded.state),
+    verdict: "fail",
+    summary: "Decision 的 Verification 投影需要修订。",
+    findings: [{
+      severity: "error",
+      code: "D1_VERIFICATION_PROJECTION",
+      message: "Verification Plan 中的 D1 结论需要由用户重新确认。",
+      artifact: "verification/plan.md",
+      factKey: "decision.D1",
+      relatedDecision: "D1",
+      repairKind: "decision",
+      repairTarget: "D1",
+      requiredClosure: ["重新确认 D1 并同步其 Verification 投影。"],
+      status: "open",
+    }],
+  });
+  assert.equal((await loadStage1(fixture.project)).state.stage1.status, "DECISION_LOOP");
+});
+
 test("Stage1 completes a deterministic profile-driven workflow", async () => {
   const fixture = await createFixture();
   await writeFile(join(fixture.project, "AGENTS.md"), "# Existing project rules\n", "utf8");
@@ -136,7 +182,7 @@ test("Stage1 completes a deterministic profile-driven workflow", async () => {
   assert.match(verification, /决策对应要求/u);
 });
 
-test("Review Correction updates structured project facts and requires a fresh audit", async () => {
+test("Review Correction updates versioned intent and requires a fresh audit", async () => {
   const fixture = await createFixture();
   await initStage1(fixture.project, fixture.profile);
   await answerDecision(fixture.project, "D1", "a");
@@ -146,17 +192,18 @@ test("Review Correction updates structured project facts and requires a fresh au
   await saveArchitectureReview(fixture.project, {
     reviewedAggregateSha256: currentGeneratedAggregate(loaded.state),
     verdict: "fail",
-    summary: "Module Manifest 缺少独立 queue 所有权。",
+    summary: "项目排除项与已确认范围冲突。",
     findings: [
       {
         severity: "error",
-        code: "MODULE_QUEUE_MISSING",
-        message: "Module Manifest 未记录 queue 模块及状态所有权。",
-        artifact: "architecture/modules.yaml",
+        code: "INTENT_EXCLUSION_STALE",
+        message: "项目排除项仍包含已经纳入 baseline 的能力。",
+        artifact: "architecture/overview.md",
+        factKey: "intent.exclusions",
         relatedDecision: "D2",
         repairKind: "project_spec",
-        repairTarget: "architecture.modules",
-        requiredClosure: ["queue 责任和状态所有权", "Stage2 实施顺序"],
+        repairTarget: "intent.exclusions",
+        requiredClosure: ["删除已经纳入 baseline 的旧排除项"],
         status: "open",
       },
     ],
@@ -166,27 +213,11 @@ test("Review Correction updates structured project facts and requires a fresh au
   assert.equal(loaded.state.stage1.status, "REVIEW_CORRECTION");
   const action = getNextStage1Action(loaded.state, loaded.loadedProfile.profile);
   assert.equal(action?.kind, "review_finding");
-  await assert.rejects(reviewStage1(fixture.project), /open audit finding MODULE_QUEUE_MISSING/u);
+  await assert.rejects(reviewStage1(fixture.project), /open audit finding INTENT_EXCLUSION_STALE/u);
 
   const patch = {
-    architecture: {
-      modules: [
-        {
-          id: "core",
-          responsibility: "Test core.",
-          stateOwnership: [],
-          dependsOn: [],
-          interfaces: ["test"],
-        },
-        {
-          id: "queue",
-          responsibility: "Hold test instructions.",
-          stateOwnership: ["entries", "valid"],
-          dependsOn: ["core"],
-          interfaces: ["enqueue", "dequeue"],
-        },
-      ],
-      stage2Order: ["core", "queue"],
+    intent: {
+      exclusions: ["virtual memory"],
     },
   };
   const statePath = join(fixture.project, ".assistant", "project.yaml");
@@ -204,21 +235,20 @@ test("Review Correction updates structured project facts and requires a fresh au
       "stage1",
       "correct",
       fixture.project,
-      "MODULE_QUEUE_MISSING",
+      "INTENT_EXCLUSION_STALE",
       "--proposal-json",
       JSON.stringify({
         patch,
-        rationale: "独立 queue 是当前项目已确认的流水边界。",
+        rationale: "已确认能力不能继续列为项目排除项。",
         evidenceSources: [{
           id: "EV_QUEUE",
           kind: "user_directive",
-          locator: "MODULE_QUEUE_MISSING",
-          claim: "用户确认独立 queue 持有 entries 和 valid，并位于 core 之后。",
+          locator: "INTENT_EXCLUSION_STALE",
+          claim: "用户确认 baseline 包含该能力，并删除冲突的旧排除项。",
           locations: [],
         }],
         evidenceCoverage: {
-          "architecture.modules": ["EV_QUEUE"],
-          "architecture.stage2Order": ["EV_QUEUE"],
+          "intent.exclusions": ["EV_QUEUE"],
         },
       }),
     ],
@@ -236,13 +266,10 @@ test("Review Correction updates structured project facts and requires a fresh au
   assert.equal("changes" in (correction ?? {}), false);
   assert.equal(loaded.state.stage1.projectSpecHistory?.events.length, 1);
   assert.deepEqual(replayProjectSpecHistory(loaded.state), loaded.state.stage1.projectSpec);
-  const modulesEvent = loaded.state.stage1.projectSpecHistory?.events[0]?.patches.find(
-    (entry) => entry.target === "architecture.modules",
+  const intentEvent = loaded.state.stage1.projectSpecHistory?.events[0]?.patches.find(
+    (entry) => entry.target === "intent.exclusions",
   );
-  assert.equal(modulesEvent?.kind, "keyed_collection");
-  if (modulesEvent?.kind === "keyed_collection") {
-    assert.deepEqual(modulesEvent.add.map((item) => item.id), ["queue"]);
-  }
+  assert.ok(intentEvent !== undefined);
   assert.doesNotMatch(
     await readFile(statePath, "utf8"),
     /previousValue:/u,
@@ -271,12 +298,11 @@ test("Review Correction updates structured project facts and requires a fresh au
     1,
   );
   assert.equal(loaded.state.stage1.reviewHistory?.[0]?.findings[0]?.status, "superseded");
-  assert.equal(loaded.loadedProfile.profile.architecture.modules.length, 1);
-  const manifest = parse(
-    await readFile(join(fixture.project, "architecture", "modules.yaml"), "utf8"),
-  ) as { modules: Array<{ id: string }>; stage2Order: string[] };
-  assert.deepEqual(manifest.modules.map((module) => module.id), ["core", "queue"]);
-  assert.deepEqual(manifest.stage2Order, ["core", "queue"]);
+  assert.deepEqual(loaded.state.stage1.projectSpec?.intent.exclusions, ["virtual memory"]);
+  await assert.rejects(
+    readFile(join(fixture.project, "architecture", "modules.yaml"), "utf8"),
+    /ENOENT/u,
+  );
 
   await assert.rejects(approveStage1(fixture.project), /audit has not been recorded/u);
   await reviewStage1(fixture.project);
@@ -322,6 +348,7 @@ test("Review Correction enforces repair ownership and declared targets", async (
         code: "D1_SCOPE_WRONG",
         message: "D1 的适用范围与系统边界冲突。",
         artifact: "architecture/overview.md",
+        factKey: "decision.D1",
         relatedDecision: "D1",
         repairKind: "decision",
         repairTarget: "D1",
@@ -451,6 +478,7 @@ test("Review Correction must include the current open audit finding", async () =
         code: "FIRST_FINDING",
         message: "先补齐项目不变量。",
         artifact: "architecture/overview.md",
+        factKey: "architecture.invariants",
         relatedDecision: "D1",
         repairKind: "project_spec",
         repairTarget: "architecture.invariants",
@@ -462,6 +490,7 @@ test("Review Correction must include the current open audit finding", async () =
         code: "SECOND_FINDING",
         message: "再补齐指令范围。",
         artifact: "architecture/overview.md",
+        factKey: "architecture.supportedInstructions",
         relatedDecision: "D1",
         repairKind: "project_spec",
         repairTarget: "architecture.supportedInstructions",
@@ -597,7 +626,7 @@ test("Review Correction v1 migration is explicit, compact, and hash preserving",
   const applied = await migrateReviewCorrectionsV2(fixture.project, true);
   assert.equal(applied.applied, true);
   const migrated = await loadStage1(fixture.project);
-  assert.equal(migrated.state.stage1.projectSpecHistory?.protocolVersion, 2);
+  assert.equal(migrated.state.stage1.projectSpecHistory?.protocolVersion, 3);
   assert.equal(migrated.state.stage1.reviewCorrections?.[0]?.status, "legacy_unresolved");
   assert.deepEqual(migrated.state.stage1.approval, approvalBefore);
   assert.deepEqual(migrated.state.stage1.generatedDocumentHashes, documentHashesBefore);
@@ -784,13 +813,13 @@ test("Stage1 prohibits document-changing operations after approval", async () =>
 
 test("Dual-issue production profile passes structural validation", async () => {
   const loaded = await loadProfile("dual_issue_demo");
-  assert.equal(loaded.profile.version, "0.7.0");
+  assert.equal(loaded.profile.version, "0.8.0");
   assert.deepEqual(
     loaded.profile.decisions.map((decision) => decision.researchPolicy),
     ["required", "none", "required", "conditional", "conditional", "required", "required", "required"],
   );
   assert.ok(loaded.profile.architecture.globalProtocols.length >= 8);
-  assert.ok(loaded.profile.architecture.modules.some((module) => module.id === "issue"));
+  assert.ok(loaded.profile.architecture.globalProtocols.some((protocol) => protocol.ownerRole === "issue"));
   assert.equal(loaded.profile.verification.decisionAcceptance.length, 8);
   assert.equal(loaded.profile.scaffold.files[0]?.path, "build.sbt");
 });
@@ -801,13 +830,15 @@ test("Dual-issue production profile generates Chinese documents and strict proje
   await initStage1(project, "dual_issue_demo", { skipProbe: true });
 
   const overview = await readFile(join(project, "architecture", "overview.md"), "utf8");
-  const manifest = await readFile(join(project, "architecture", "modules.yaml"), "utf8");
   const agents = await readFile(join(project, "AGENTS.md"), "utf8");
   assert.match(overview, /^# 架构总览/mu);
   assert.match(overview, /构建一个正确、可检查的顺序双发射 baseline/u);
-  assert.match(manifest, /documentLanguage: zh-CN/u);
+  await assert.rejects(
+    readFile(join(project, "architecture", "modules.yaml"), "utf8"),
+    /ENOENT/u,
+  );
   assert.match(agents, /默认使用中文撰写人类可读文档/u);
-  assert.match(agents, /每个源码和测试路径只允许一个 Module ID 拥有/u);
+  assert.match(agents, /每个源码和测试路径只允许一个 Implementation Unit 拥有/u);
   assert.match(agents, /禁止自行补协议、字段、身份保护和保守机制/u);
   assert.match(agents, /processor-agent open <path>/u);
   assert.match(agents, /不得用直接编辑替代 Harness 命令/u);
@@ -831,7 +862,7 @@ test("Workspace Agent prompt routes natural language through the Harness", async
   assert.match(prompt, /repairKind=decision/u);
   assert.match(prompt, /影响正式决策的来源调研不得由 Workspace Agent 在主上下文中直接完成/u);
   assert.match(prompt, /Correction Proposal JSON 只作为机器输入/u);
-  assert.match(prompt, /禁止输出完整 modules 数组/u);
+  assert.match(prompt, /不回显完整数组/u);
   assert.match(prompt, /target -> Evidence ID -> 来源与主张/u);
   assert.match(prompt, /不得回显已经提交的 Proposal/u);
   assert.match(prompt, /nextAction=decision_ready/u);
@@ -1284,6 +1315,7 @@ async function createInvariantCorrectionFixture(): Promise<{
       code: "INVARIANT_INCOMPLETE",
       message: "Architecture 未记录项目新增不变量。",
       artifact: "architecture/overview.md",
+      factKey: "architecture.invariants",
       relatedDecision: "D1",
       repairKind: "project_spec",
       repairTarget: "architecture.invariants",
@@ -1304,8 +1336,23 @@ function invariantUserEvidence() {
   };
 }
 
+function auditFinding(code: string): ArchitectureReviewFinding {
+  return {
+    severity: "error",
+    code,
+    message: "Fixture finding.",
+    artifact: "architecture/overview.md",
+    factKey: "intent.goal",
+    relatedDecision: "",
+    repairKind: "project_spec",
+    repairTarget: "intent.goal",
+    requiredClosure: ["Close fixture finding."],
+    status: "open",
+  };
+}
+
 function fixtureProfile(): string {
-  return `schemaVersion: 1
+  return `schemaVersion: 2
 id: test_profile
 version: 1.0.0
 displayName: Test Profile
@@ -1357,6 +1404,9 @@ decisions:
         summary: Second option B.
         consequences: [B consequence]
 architecture:
+  roles:
+    - id: core
+      responsibility: Test core behavior.
   systemBoundary: [Test boundary]
   supportedInstructions: [Test instruction]
   invariants: [In order]
@@ -1369,24 +1419,21 @@ architecture:
       validUntil: output
   globalProtocols:
     - id: test_protocol
-      owner: core
+      ownerRole: core
+      producerRoles: [core]
+      consumerRoles: [core]
+      affectedResources: []
       rules: [Test rule]
   counterRules:
     - name: cycles
       increment: Increment every test cycle.
       exclusions: [reset]
-  modules:
-    - id: core
-      responsibility: Test core.
-      stateOwnership: []
-      dependsOn: []
-      interfaces: [test]
-  stage2Order: [core]
 verification:
   referenceModel: Test model.
   layers: [unit]
   requiredScenarios: [smoke]
   counters: [cycles]
+  completionCriteria: [All units pass]
 scaffold:
   files:
     - path: build.fixture

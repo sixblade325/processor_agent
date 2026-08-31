@@ -25,6 +25,17 @@ import {
   researchRequestFingerprint,
 } from "./research.js";
 import { renderFormalDocuments } from "./render.js";
+import {
+  PROJECT_SPEC_TARGETS,
+  buildFactSourceIndex,
+  effectiveProjectSpec,
+  getProjectSpecTarget,
+  isProjectSpecTarget,
+  profileProjectSpec,
+  projectSpecTargetArtifact,
+  setProjectSpecTarget,
+  validateProjectSpec,
+} from "./stage1/project-spec.js";
 import type {
   DecisionResearchState,
   DecisionRevisionRecord,
@@ -87,8 +98,8 @@ export interface ReviewCorrectionProposal {
 
 export interface ReviewCorrectionMigrationReport {
   project: string;
-  sourceProtocolVersion: 1 | 2;
-  targetProtocolVersion: 2;
+  sourceProtocolVersion: 1 | 2 | 3;
+  targetProtocolVersion: 3;
   correctionCount: number;
   eventCount: number;
   legacyUnresolvedCount: number;
@@ -117,24 +128,6 @@ export interface BeginStage1ArchitectureReworkInput {
   startedAt: string;
 }
 
-const PROJECT_SPEC_TARGETS = [
-  "architecture.systemBoundary",
-  "architecture.supportedInstructions",
-  "architecture.invariants",
-  "architecture.sharedFields",
-  "architecture.globalProtocols",
-  "architecture.counterRules",
-  "architecture.modules",
-  "architecture.stage2Order",
-  "verification.referenceModel",
-  "verification.layers",
-  "verification.requiredScenarios",
-  "verification.counters",
-  "verification.decisionAcceptance",
-] as const satisfies readonly ProjectSpecTarget[];
-
-const PROJECT_SPEC_TARGET_SET = new Set<string>(PROJECT_SPEC_TARGETS);
-
 export async function initStage1(
   projectPath: string,
   profileReference: string,
@@ -160,12 +153,15 @@ export async function initStage1(
   );
 
   const timestamp = new Date().toISOString();
-  const initialProjectSpec: Stage1ProjectSpec = structuredClone({
-    architecture: profile.architecture,
-    verification: profile.verification,
-  });
+  const initialIntent = {
+    goal: options.goal ?? profile.defaults.goal,
+    useCase: options.useCase ?? profile.defaults.useCase,
+    constraints: options.constraints ?? profile.defaults.constraints,
+    exclusions: options.exclusions ?? profile.defaults.exclusions,
+  };
+  const initialProjectSpec = profileProjectSpec(profile, initialIntent);
   const state: Stage1ProjectState = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     project: {
       id: slugify(options.projectName ?? profile.defaults.projectName),
       name: options.projectName ?? profile.defaults.projectName,
@@ -182,19 +178,13 @@ export async function initStage1(
       revision: 0,
       createdAt: timestamp,
       updatedAt: timestamp,
-      intent: {
-        goal: options.goal ?? profile.defaults.goal,
-        useCase: options.useCase ?? profile.defaults.useCase,
-        constraints: options.constraints ?? profile.defaults.constraints,
-        exclusions: options.exclusions ?? profile.defaults.exclusions,
-      },
       decisions: Object.fromEntries(
         profile.decisions.map((decision) => [decision.id, { status: "pending" }]),
       ),
       environment: [],
       projectSpec: initialProjectSpec,
       projectSpecHistory: {
-        protocolVersion: 2,
+        protocolVersion: 3,
         baseline: {
           profileDigest: loadedProfile.digest,
           projectSpecSha256: valueSha256(initialProjectSpec),
@@ -202,7 +192,12 @@ export async function initStage1(
         },
         events: [],
       },
-      overriddenTargets: [],
+      overriddenTargets: [
+        ...(options.goal === undefined ? [] : ["intent.goal" as const]),
+        ...(options.useCase === undefined ? [] : ["intent.useCase" as const]),
+        ...(options.constraints === undefined ? [] : ["intent.constraints" as const]),
+        ...(options.exclusions === undefined ? [] : ["intent.exclusions" as const]),
+      ],
       generatedDocumentHashes: {},
       blockers: [],
       history: [],
@@ -313,13 +308,12 @@ export async function refreshStage1Profile(
   for (const decision of next.profile.decisions) {
     decisions[decision.id] = state.stage1.decisions[decision.id] ?? { status: "pending" };
   }
-  migrateDefaultIntent(
-    state,
-    loaded.loadedProfile.profile,
-    next.profile,
-    options.adoptProfileDefaults === true,
-  );
   migrateEnvironmentEvidence(state, loaded.loadedProfile.profile, next.profile);
+  if (options.adoptProfileDefaults === true) {
+    state.stage1.overriddenTargets = (state.stage1.overriddenTargets ?? []).filter(
+      (target) => !target.startsWith("intent."),
+    );
+  }
   const previousProfileDigest = state.project.profile.digest;
   const previousProjectSpec = effectiveProjectSpec(state, loaded.loadedProfile.profile);
   const rebasedProjectSpec = rebaseProjectSpec(state, next.profile);
@@ -515,6 +509,7 @@ export async function beginStage1ArchitectureRework(
         code: `${input.id}_PROJECT_SPEC`,
         message: input.summary.trim(),
         artifact: projectSpecTargetArtifact(input.repairTarget),
+        factKey: input.repairTarget,
         relatedDecision: "",
         repairKind: "project_spec",
         repairTarget: input.repairTarget,
@@ -531,15 +526,6 @@ export async function beginStage1ArchitectureRework(
     };
   }
   recordEvent(state, "ARCHITECTURE_REWORK_STARTED", input.id);
-}
-
-function projectSpecTargetArtifact(target: string): string {
-  if (target === "architecture.modules" || target === "architecture.stage2Order") {
-    return "architecture/modules.yaml";
-  }
-  return target.startsWith("verification.")
-    ? "verification/plan.md"
-    : "architecture/overview.md";
 }
 
 export function closeStage1ArchitectureRework(
@@ -774,7 +760,7 @@ export async function approveStage1(projectPath: string): Promise<LoadedProject>
   if (architectureRework?.status === "reapproved") {
     architectureRework.newApprovalSha256 = state.stage1.approval.aggregateSha256;
     if (
-      state.stage2?.schemaVersion === 2
+      state.stage2?.schemaVersion === 3
       && state.stage2.architectureRework?.id === architectureRework.id
       && state.stage2.architectureRework.status === "stage1_rework"
     ) {
@@ -869,7 +855,7 @@ export async function summarizeStage1(loaded: LoadedProject): Promise<Stage1Summ
     deferred: values.filter((item) => item.status === "deferred").length,
     blockers: effectiveBlockers,
     approvalCurrent,
-    projectSpecProtocolVersion: state.stage1.projectSpecHistory?.protocolVersion === 2 ? 2 : 1,
+    projectSpecProtocolVersion: state.stage1.projectSpecHistory?.protocolVersion ?? 1,
     projectSpecHistoryEvents: state.stage1.projectSpecHistory?.events.length ?? 0,
     legacyUnresolvedCorrections: (state.stage1.reviewCorrections ?? []).filter(
       (correction) => correction.status === "legacy_unresolved",
@@ -946,7 +932,7 @@ export async function saveArchitectureReview(
   if (report.reviewedAggregateSha256 !== currentHash) {
     throw new Error("Architecture audit does not match the current Stage1 documents");
   }
-  validateArchitectureReviewReport(report, profile);
+  validateArchitectureReviewReport(report, state, profile);
   const reportPath = ".assistant/reviews/stage1.json";
   await atomicWriteText(
     resolveWithin(root, reportPath),
@@ -1037,15 +1023,7 @@ export async function applyReviewCorrection(
   for (const entry of patchEntries) {
     setProjectSpecTarget(candidate, entry.target, entry.value);
   }
-  const normalizedProfile = validateProfile({
-    ...structuredClone(profile),
-    architecture: candidate.architecture,
-    verification: candidate.verification,
-  });
-  const normalizedSpec: Stage1ProjectSpec = {
-    architecture: normalizedProfile.architecture,
-    verification: normalizedProfile.verification,
-  };
+  const normalizedSpec = validateProjectSpec(candidate, profile);
   const changedTargets = patchEntries
     .filter((entry) => !sameValue(
       getProjectSpecTarget(currentSpec, entry.target),
@@ -1066,6 +1044,24 @@ export async function applyReviewCorrection(
     evidenceSources,
     input.evidenceCoverage,
   );
+
+  const candidateState = structuredClone(state);
+  candidateState.stage1.projectSpec = normalizedSpec;
+  const candidateDocuments = await renderFormalDocuments(root, candidateState, profile);
+  for (const finding of findings) {
+    const candidateDocument = candidateDocuments[finding.artifact];
+    if (candidateDocument === undefined) {
+      throw new Error(
+        `Review Correction target ${finding.repairTarget} does not render ${finding.artifact}`,
+      );
+    }
+    const currentDocument = await readText(resolveWithin(root, finding.artifact));
+    if (sha256(candidateDocument) === sha256(currentDocument)) {
+      throw new Error(
+        `Review Correction target ${finding.repairTarget} cannot change finding artifact ${finding.artifact}`,
+      );
+    }
+  }
 
   const timestamp = new Date().toISOString();
   const correctionNumber = (state.stage1.reviewCorrections?.length ?? 0) + 1;
@@ -1134,26 +1130,13 @@ export function currentGeneratedAggregate(state: Stage1ProjectState): string {
   return aggregateHashes(state.stage1.generatedDocumentHashes);
 }
 
-function effectiveProjectSpec(
-  state: Stage1ProjectState,
-  profile: ProjectProfile,
-): Stage1ProjectSpec {
-  return structuredClone(state.stage1.projectSpec ?? {
-    architecture: profile.architecture,
-    verification: profile.verification,
-  });
-}
-
 function rebaseProjectSpec(
   state: Stage1ProjectState,
   profile: ProjectProfile,
 ): Stage1ProjectSpec {
-  const candidate: Stage1ProjectSpec = structuredClone({
-    architecture: profile.architecture,
-    verification: profile.verification,
-  });
+  const candidate = profileProjectSpec(profile);
   const current = effectiveProjectSpec(state, profile);
-  if (state.stage1.projectSpecHistory?.protocolVersion === 2) {
+  if ((state.stage1.projectSpecHistory?.protocolVersion ?? 0) >= 2) {
     for (const target of state.stage1.overriddenTargets ?? []) {
       setProjectSpecTarget(candidate, target, structuredClone(getProjectSpecTarget(current, target)));
     }
@@ -1173,6 +1156,7 @@ function rebaseProjectSpec(
     verification: candidate.verification,
   });
   return {
+    intent: structuredClone(candidate.intent),
     architecture: normalized.architecture,
     verification: normalized.verification,
   };
@@ -1182,7 +1166,7 @@ const PROJECT_SPEC_COLLECTION_KEYS: Partial<Record<
   ProjectSpecTarget,
   "id" | "name" | "decisionId"
 >> = {
-  "architecture.modules": "id",
+  "architecture.roles": "id",
   "architecture.sharedFields": "name",
   "architecture.globalProtocols": "id",
   "architecture.counterRules": "name",
@@ -1195,7 +1179,7 @@ function valueSha256(value: unknown): string {
 
 function requireProjectSpecHistoryV2(state: Stage1ProjectState): ProjectSpecHistory {
   const history = state.stage1.projectSpecHistory;
-  if (history?.protocolVersion !== 2) {
+  if (history === undefined || history.protocolVersion < 2) {
     throw new Error(
       "ProjectSpec history uses Review Correction v1; run `stage1 correction-migrate <path> --dry-run` and then `--apply`",
     );
@@ -1209,7 +1193,7 @@ function isReviewCorrectionV2(
   return correction.schemaVersion === 2;
 }
 
-function createProjectSpecPatches(
+export function createProjectSpecPatches(
   before: Stage1ProjectSpec,
   after: Stage1ProjectSpec,
 ): ProjectSpecDomainPatch[] {
@@ -1444,7 +1428,7 @@ export function replayProjectSpecHistory(
 }
 
 function assertProjectSpecHistoryCurrent(state: Stage1ProjectState): void {
-  if (state.stage1.projectSpecHistory?.protocolVersion !== 2) {
+  if ((state.stage1.projectSpecHistory?.protocolVersion ?? 0) < 2) {
     return;
   }
   if (state.stage1.projectSpec === undefined) {
@@ -1589,7 +1573,7 @@ export async function migrateReviewCorrectionsV2(
   const beforeText = await readText(resolveWithin(root, STATE_PATH));
   const beforeDocumentHashes = structuredClone(state.stage1.generatedDocumentHashes);
   const beforeApproval = structuredClone(state.stage1.approval);
-  const sourceProtocolVersion: 1 | 2 = state.stage1.projectSpecHistory?.protocolVersion === 2 ? 2 : 1;
+  const sourceProtocolVersion: 1 | 2 | 3 = state.stage1.projectSpecHistory?.protocolVersion ?? 1;
   const migrated = structuredClone(state);
 
   if (sourceProtocolVersion === 1) {
@@ -1606,7 +1590,7 @@ export async function migrateReviewCorrectionsV2(
       }
     }
     migrated.stage1.projectSpecHistory = {
-      protocolVersion: 2,
+      protocolVersion: 3,
       baseline: {
         profileDigest: migrated.project.profile.digest,
         projectSpecSha256: valueSha256(baseline),
@@ -1686,7 +1670,7 @@ export async function migrateReviewCorrectionsV2(
   const report: ReviewCorrectionMigrationReport = {
     project: migrated.project.name,
     sourceProtocolVersion,
-    targetProtocolVersion: 2,
+    targetProtocolVersion: 3,
     correctionCount: migrated.stage1.reviewCorrections?.length ?? 0,
     eventCount: migrated.stage1.projectSpecHistory?.events.length ?? 0,
     legacyUnresolvedCount: (migrated.stage1.reviewCorrections ?? []).filter(
@@ -1722,7 +1706,7 @@ function projectSpecChangeHistoryBytes(state: Stage1ProjectState): number {
     "utf8",
   );
   const history = state.stage1.projectSpecHistory;
-  if (history?.protocolVersion !== 2) {
+  if (history === undefined || history.protocolVersion < 2) {
     return correctionIndexBytes;
   }
   const compressedBytes = state.stage1.projectSpecHistoryStorage?.compressedBytes
@@ -1768,20 +1752,9 @@ export async function releaseProjectSpecOverride(
   }
   const before = effectiveProjectSpec(state, loaded.loadedProfile.profile);
   const after = structuredClone(before);
-  const profileSpec: Stage1ProjectSpec = {
-    architecture: structuredClone(loaded.loadedProfile.profile.architecture),
-    verification: structuredClone(loaded.loadedProfile.profile.verification),
-  };
+  const profileSpec = profileProjectSpec(loaded.loadedProfile.profile);
   setProjectSpecTarget(after, target, structuredClone(getProjectSpecTarget(profileSpec, target)));
-  const normalizedProfile = validateProfile({
-    ...structuredClone(loaded.loadedProfile.profile),
-    architecture: after.architecture,
-    verification: after.verification,
-  });
-  const normalized: Stage1ProjectSpec = {
-    architecture: normalizedProfile.architecture,
-    verification: normalizedProfile.verification,
-  };
+  const normalized = validateProjectSpec(after, loaded.loadedProfile.profile);
   appendProjectSpecEvent(state, {
     kind: "override_release",
     before,
@@ -1820,6 +1793,8 @@ function archiveCurrentReview(state: Stage1ProjectState): void {
 function hasReviewRepairMetadata(finding: ArchitectureReviewFinding): boolean {
   return (
     ["decision", "project_spec", "profile"].includes(finding.repairKind)
+    && typeof finding.factKey === "string"
+    && finding.factKey.trim() !== ""
     && typeof finding.repairTarget === "string"
     && finding.repairTarget.trim() !== ""
     && Array.isArray(finding.requiredClosure)
@@ -1830,6 +1805,7 @@ function hasReviewRepairMetadata(finding: ArchitectureReviewFinding): boolean {
 
 function validateArchitectureReviewReport(
   report: ArchitectureReviewReport,
+  state: Stage1ProjectState,
   profile: ProjectProfile,
 ): void {
   if (report.summary.trim() === "") {
@@ -1842,6 +1818,9 @@ function validateArchitectureReviewReport(
     throw new Error("A failing architecture audit must contain at least one finding");
   }
   const decisionIds = new Set(profile.decisions.map((decision) => decision.id));
+  const factSources = new Map(
+    buildFactSourceIndex(state, profile).map((entry) => [entry.factKey, entry]),
+  );
   const codes = new Set<string>();
   for (const finding of report.findings) {
     if (finding.code.trim() === "" || codes.has(finding.code)) {
@@ -1859,12 +1838,29 @@ function validateArchitectureReviewReport(
     if (finding.requiredClosure.some((item) => item.trim() === "")) {
       throw new Error(`Architecture audit finding ${finding.code} has an empty closure item`);
     }
+    const factSource = factSources.get(finding.factKey);
+    if (factSource === undefined) {
+      throw new Error(`Architecture audit finding ${finding.code} references unknown factKey ${finding.factKey}`);
+    }
+    if (!factSource.renderedLocations.some((location) => location.artifact === finding.artifact)) {
+      throw new Error(
+        `Architecture audit finding ${finding.code} artifact does not own ${finding.factKey}`,
+      );
+    }
+    if (finding.repairKind !== factSource.mutableThrough) {
+      throw new Error(
+        `Architecture audit finding ${finding.code} must use repairKind=${factSource.mutableThrough}`,
+      );
+    }
     if (finding.repairKind === "decision") {
       if (!decisionIds.has(finding.relatedDecision)) {
         throw new Error(`Architecture audit finding ${finding.code} references an unknown Decision`);
       }
       if (finding.repairTarget !== finding.relatedDecision) {
         throw new Error(`Decision finding ${finding.code} must target ${finding.relatedDecision}`);
+      }
+      if (finding.factKey !== `decision.${finding.repairTarget}`) {
+        throw new Error(`Decision finding ${finding.code} has inconsistent factKey`);
       }
     } else if (finding.repairKind === "project_spec") {
       if (!isProjectSpecTarget(finding.repairTarget)) {
@@ -1875,8 +1871,11 @@ function validateArchitectureReviewReport(
       if (finding.relatedDecision !== "" && !decisionIds.has(finding.relatedDecision)) {
         throw new Error(`Architecture audit finding ${finding.code} references an unknown Decision`);
       }
-    } else if (!finding.repairTarget.startsWith("profile.")) {
-      throw new Error(`Profile finding ${finding.code} must use a profile.* target`);
+      if (finding.repairTarget !== finding.factKey) {
+        throw new Error(`Project-spec finding ${finding.code} must target ${finding.factKey}`);
+      }
+    } else if (finding.repairTarget !== `profile.${finding.factKey}`) {
+      throw new Error(`Profile finding ${finding.code} must target profile.${finding.factKey}`);
     }
   }
 }
@@ -1910,7 +1909,9 @@ function normalizeProjectSpecPatch(
   if (rootKeys.length === 0) {
     throw new Error("Review Correction patch must not be empty");
   }
-  const unknownRoot = rootKeys.find((key) => key !== "architecture" && key !== "verification");
+  const unknownRoot = rootKeys.find((key) =>
+    key !== "intent" && key !== "architecture" && key !== "verification"
+  );
   if (unknownRoot !== undefined) {
     throw new Error(`Review Correction patch has unsupported section ${unknownRoot}`);
   }
@@ -1929,24 +1930,6 @@ function normalizeProjectSpecPatch(
     throw new Error("Review Correction patch must update at least one field");
   }
   return entries;
-}
-
-export function isProjectSpecTarget(value: string): value is ProjectSpecTarget {
-  return PROJECT_SPEC_TARGET_SET.has(value);
-}
-
-function getProjectSpecTarget(spec: Stage1ProjectSpec, target: ProjectSpecTarget): unknown {
-  const [section, field] = target.split(".") as ["architecture" | "verification", string];
-  return (spec[section] as unknown as Record<string, unknown>)[field];
-}
-
-function setProjectSpecTarget(
-  spec: Stage1ProjectSpec,
-  target: ProjectSpecTarget,
-  value: unknown,
-): void {
-  const [section, field] = target.split(".") as ["architecture" | "verification", string];
-  (spec[section] as unknown as Record<string, unknown>)[field] = value;
 }
 
 function objectRecord(value: unknown, label: string): Record<string, unknown> {
@@ -1968,7 +1951,6 @@ function reviewReportPayload(review: NonNullable<Stage1ProjectState["stage1"]["r
 async function assertFormalFilesAbsent(root: string): Promise<void> {
   const paths = [
     "architecture/overview.md",
-    "architecture/modules.yaml",
     "verification/plan.md",
   ];
   const conflicts: string[] = [];
@@ -2017,7 +1999,7 @@ async function ensureProjectRules(root: string): Promise<void> {
 1. \`architecture/\` 由用户批准。Agent 可以生成草案，不能自行把草案标记为已批准。
 2. \`design/\` 由用户和 Agent 共同维护，负责把架构要求落实到模块、字段、接口、周期和验证点。
 3. \`src/\` 与 \`verification/\` 是正式项目资产。源码修改必须关联已闭合的 Design 和验收条件。
-4. 每个 Module ID 只对应一份 Design。每个源码和测试路径只允许一个 Module ID 拥有，路径归属由已批准 Design 声明。
+4. 每个 Implementation Unit 只对应一份 Design。每个源码和测试路径只允许一个 Implementation Unit 拥有，路径归属由已批准 Implementation Plan 声明。
 5. \`experiments/\` 只保存可复现并经过确认的结论。
 6. \`.assistant/\` 由 Processor Agent 维护。用户和普通实现任务不得手工修改其中的状态、哈希和审批记录。
 7. 同一事实只保留一个权威正文，其他位置使用摘要和链接。
@@ -2107,7 +2089,7 @@ async function ensureProjectRules(root: string): Promise<void> {
 19. 编译、主验证、静态审查和验证审查全部通过后，模块才能进入 \`COMPLETE\`。
 20. 双 Agent 轮转由 Harness 原子更新，Agent 不得直接修改自己或另一 Agent 的 assignment。
 21. Review Correction 必须提交包含 patch、rationale、evidenceSources 和 evidenceCoverage 的 Proposal。Audit report 只作为 findingSource，不能作为新值 Evidence。
-22. Stage2 暴露 Architecture 错误时必须使用 \`stage2 rework-start\` 返回 Stage1。不得通过 Module Design、源码补丁或手工状态修改掩盖 Architecture 缺口。
+22. Stage2 暴露 Architecture 错误时必须使用 \`stage2 rework-start\` 返回 Stage1。不得通过 Unit Design、源码补丁或手工状态修改掩盖 Architecture 缺口。
 23. Architecture Rework 期间 Stage2 Agent 租约全部失效。Stage1 新 approval 后只能使用 \`stage2 rework-resume\` 恢复，并重新闭合失效 Topology Decision 和 \`NEEDS_REALIGN\` Unit。
 24. Profile refresh 保留项目覆盖字段。只有用户明确确认后才能使用 \`stage1 release-override\` 交还 Profile 管理。
 `;
@@ -2133,7 +2115,7 @@ out/
   await writeNewOrSame(path, content);
 }
 
-async function syncFormalDocuments(
+export async function syncFormalDocuments(
   root: string,
   state: Stage1ProjectState,
   profile: ProjectProfile,
@@ -2228,7 +2210,7 @@ async function readState(root: string): Promise<Stage1ProjectState> {
     throw new Error(`Stage1 state not found at ${path}`);
   }
   const value = parse(await readText(path)) as Stage1ProjectState;
-  if (value.schemaVersion !== 1 || value.project?.root !== "." || value.stage1 === undefined) {
+  if (![1, 2].includes(value.schemaVersion) || value.project?.root !== "." || value.stage1 === undefined) {
     throw new Error(`Unsupported or invalid Stage1 state at ${path}`);
   }
   const storage = value.stage1.projectSpecHistoryStorage;
@@ -2238,7 +2220,7 @@ async function readState(root: string): Promise<Stage1ProjectState> {
   if (value.stage1.projectSpecHistory === undefined && storage !== undefined) {
     const pathMatch = PROJECT_SPEC_HISTORY_PATH_PATTERN.exec(storage.path);
     if (
-      storage.protocolVersion !== 2
+      ![2, 3].includes(storage.protocolVersion)
       || pathMatch === null
       || !/^[a-f0-9]{64}$/u.test(storage.sha256)
       || pathMatch[1] !== storage.sha256.slice(0, 20)
@@ -2276,7 +2258,7 @@ async function readState(root: string): Promise<Stage1ProjectState> {
     if (
       history === null
       || typeof history !== "object"
-      || history.protocolVersion !== 2
+      || history.protocolVersion !== storage.protocolVersion
       || !Array.isArray(history.events)
       || history.events.length !== storage.eventCount
       || history.baseline === undefined
@@ -2336,7 +2318,7 @@ function buildProjectStateStorageArtifacts(state: Stage1ProjectState): ProjectSt
     delete stored.stage1.projectSpecHistoryStorage;
     return { stateText: stringify(stored, { lineWidth: 0 }) };
   }
-  if (history.protocolVersion !== 2) {
+  if (![2, 3].includes(history.protocolVersion)) {
     throw new Error(`Unsupported ProjectSpec history protocol ${String(history.protocolVersion)}`);
   }
   assertProjectSpecHistoryCurrent(state);
@@ -2345,7 +2327,7 @@ function buildProjectStateStorageArtifacts(state: Stage1ProjectState): ProjectSt
   const historySha256 = sha256Bytes(historyContent);
   const historyPath = `${PROJECT_SPEC_HISTORY_PREFIX}${historySha256.slice(0, 20)}.json.gz`;
   const storage = {
-    protocolVersion: 2 as const,
+    protocolVersion: history.protocolVersion,
     path: historyPath,
     sha256: historySha256,
     eventCount: history.events.length,
@@ -2682,26 +2664,6 @@ function sameDecisionContract(left: DecisionSpec, right: DecisionSpec): boolean 
     { ...left, researchPolicy: null },
     { ...right, researchPolicy: null },
   );
-}
-
-function migrateDefaultIntent(
-  state: Stage1ProjectState,
-  previous: ProjectProfile,
-  next: ProjectProfile,
-  force: boolean,
-): void {
-  if (force || state.stage1.intent.goal === previous.defaults.goal) {
-    state.stage1.intent.goal = next.defaults.goal;
-  }
-  if (force || state.stage1.intent.useCase === previous.defaults.useCase) {
-    state.stage1.intent.useCase = next.defaults.useCase;
-  }
-  if (force || sameValue(state.stage1.intent.constraints, previous.defaults.constraints)) {
-    state.stage1.intent.constraints = [...next.defaults.constraints];
-  }
-  if (force || sameValue(state.stage1.intent.exclusions, previous.defaults.exclusions)) {
-    state.stage1.intent.exclusions = [...next.defaults.exclusions];
-  }
 }
 
 function migrateEnvironmentEvidence(

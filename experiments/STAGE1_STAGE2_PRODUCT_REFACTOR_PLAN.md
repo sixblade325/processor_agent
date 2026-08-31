@@ -1,6 +1,6 @@
 # Stage1 与 Stage2 产品重构计划
 
-状态：方向已确认，等待 `dual_issue_demo` 基线完成后实施
+状态：已实施，`dual_issue_demo` 已完成结构迁移并停在用户修正确认门禁
 
 记录时间：2026-08-31
 
@@ -12,7 +12,7 @@
 4. [Stage1 与 Stage2 模块粒度问题记录](./STAGE1_STAGE2_MODULE_GRANULARITY_PROBLEM.md)
 5. [Stage2 返回 Stage1 与 Stage1 V2 实现计划](./STAGE2_STAGE1_REWORK_IMPLEMENTATION_PLAN.md)
 
-本文记录 Demo 完成后的产品重构方案。当前只冻结重构目标、阶段边界、数据迁移和验收条件，不修改 Harness、Schema、Profile、用户项目状态或现行权威计划。
+本文保留重构动机、阶段边界、迁移要求和验收条件。实施后的权威行为以产品总纲、Stage1 计划、Stage2 计划和当前 Schema 为准。
 
 ## 1. 重构目标
 
@@ -124,7 +124,7 @@ Topology Draft 只是讨论材料。用户批准前，不得成为正式实现�
 
 最小产品目标不新增另一份用户必须维护的 Topology 文件。Stage2 状态作为机器事实源，`design/plan.md` 作为人类可读投影。
 
-`architecture/modules.yaml` 在旧项目迁移期间按兼容输入处理。新项目不再由 Stage1 生成该文件。实际迁移后是否保留 Stage2 机器可读文件，需要通过实现成本和调试需求决定。
+`architecture/modules.yaml` 在旧项目迁移期间只作为兼容输入。新项目不再由 Stage1 生成该文件。旧文件由显式产品迁移退役，Stage2 机器事实保存在 `.assistant/project.yaml`，人类投影保存在 `design/plan.md`。
 
 ## 5. Global Protocol 重构
 
@@ -250,19 +250,19 @@ Stage2 发现以下变化时返回 Stage1：
 | Demo 临时 8 模块被误当成产品默认值 | 在迁移规则中明确标记为项目兼容快照 |
 | 重构范围扩散到 Stage3 | 本计划不调整 Stage3，Stage3 只消费已实现和已验证的 Stage2 结果 |
 
-## 10. 实施前仍需拍板的问题
+## 10. 已闭合的实现选择
 
-1. Stage2 是否需要独立的机器可读 Topology 文件，或只保存在 `.assistant/project.yaml`。
-2. 架构角色的最小 Schema，以及 producer、consumer 和 shared resource 的表达方式。
-3. 新项目在 Stage1 完成前是否创建空 `design/`，或进入 Stage2 时再创建。
-4. 旧 Module Manifest 的迁移后保留期限和删除门禁。
-5. 已批准 Stage1 项目迁移后是否自动保持批准，或要求一次范围受限的迁移确认。
+1. Stage2 不增加独立机器可读 Topology 文件。机器状态进入 `.assistant/project.yaml`，`design/plan.md` 是人类可读投影。
+2. Architecture Role 的最小字段为 `id` 和 `responsibility`。Global Protocol 使用 `ownerRole`、`producerRoles`、`consumerRoles` 和 `affectedResources` 表达稳定关系。
+3. 新项目在 Stage1 不创建空 `design/`。首次进入 Stage2 时创建 `design/plan.md`。
+4. 旧 Module Manifest 只有在其哈希仍匹配 Harness 记录时才由显式迁移删除。
+5. 产品迁移不自动沿用旧 Architecture approval。迁移后重新执行 Review、独立 Audit 和用户 Approval。
 
-这些问题在 Phase 1 和 Phase 2 设计审查中逐项决定，不阻塞当前 Demo。
+这些选择已经进入 Schema、Harness、迁移命令和自动测试。
 
 ## 11. 启动条件
 
-满足以下条件后启动本重构：
+原计划设置以下启动条件：
 
 1. `dual_issue_demo` baseline 可以稳定编译和仿真。
 2. 最低功能测试和参考模型检查通过。
@@ -270,7 +270,7 @@ Stage2 发现以下变化时返回 Stage1：
 4. 至少一个 Stage2 Unit 完成 Draft、批准、实现和验证的完整生命周期。
 5. 当前两阶段工作流的使用数据和问题复盘已经落档。
 
-启动前，Demo 继续使用现有 Harness 和临时模块边界。当前兼容状态不得继续扩展为通用产品规则。
+用户在 2026-08-31 明确要求立即实施，因此本节启动条件被该指令取代。迁移仍保留只读预检、历史重放和用户批准门禁。
 
 ## 12. 事实所有权与可修正性
 
@@ -314,10 +314,11 @@ factKey
 ownerKind
 ownerPath
 sourceRevisionOrDigest
-renderedArtifact
-renderedSection
+renderedLocations
 mutableThrough
 ```
+
+`renderedLocations` 是 artifact 与 section 的列表。同一 Decision fact 可以同时投影到 Architecture Overview 和 Verification Plan，仍只有一个事实所有者。
 
 `ownerKind` 的最小集合为：
 
@@ -379,3 +380,23 @@ Stage1 Intent 采用以下收敛方案：
 7. Correction 候选未改变目标生成片段时不增加正式 revision、history event 或重复快照。
 8. Profile refresh、Review Correction 和 Architecture Rework 之间不存在无公开命令可恢复的状态组合。
 9. 迁移后的 `dual_issue_demo` 可以通过 Review、独立 Audit、用户批准并恢复 `S2_ARW_001`。
+
+## 13. 实施结果
+
+实施日期：2026-08-31
+
+1. Stage1 项目状态升级为 schemaVersion 2，ProjectSpec history 升级为 protocolVersion 3。
+2. Intent 已纳入 ProjectSpec，Review Correction 可以直接修改 `intent.goal`、`intent.useCase`、`intent.constraints` 和 `intent.exclusions`。
+3. Stage1 删除 `architecture.modules` 和 `architecture.stage2Order`，正式文档不再生成 `architecture/modules.yaml`。
+4. Stage1 新增 Architecture Role。Global Protocol 通过 Role 关系表达语义，不引用 Implementation Unit。
+5. Verification 新增 `completionCriteria`，Renderer 不再保存项目级 Stage2 完成门禁正文。
+6. Architecture audit 必须返回有效 `factKey`。Harness 根据事实来源索引校验 artifact、owner 和 repair target。
+7. Stage2 升级为 schemaVersion 3。Implementation Unit 使用 `kind` 和 `architectureRoles`，并强制每个 Architecture Role 唯一映射。
+8. 新增顶层 `migrate <path> --profile <id> --dry-run|--apply`。迁移保留 Decision、Correction 和历史链，退役旧 Module Manifest，重建 Stage2 Topology，并要求重新审查和用户批准。
+9. `dual_issue_demo` Profile 升级为 `0.8.0`，删除旧 Cache 排除项和旧 Module owner 模型。
+10. 代码按职责拆分出 Stage1 ProjectSpec、Stage2 Topology Model、Stage2 Presentation、Stage2 Worker Contracts 和 Product Migration 模块。
+11. `dual_issue_demo` 从 Stage1 revision 141 迁移到 142，随后确定性 Review 和独立 Audit 推进到 revision 144。8 个 Decision、27 个 Correction 和 ProjectSpec 历史链均保留，4 个无法修改旧 Intent 的重复 Correction 标记为 `ineffective`。
+12. Stage2 从 schemaVersion 2 revision 7 迁移到 schemaVersion 3 revision 8，旧 Plan 失效，`S2_ARW_001` 保持活动，`architecture/modules.yaml` 已删除。
+13. 当前 Audit finding 为 `S1_REVIEW_RESET_VECTOR_COVERAGE`，修正目标是 `verification.requiredScenarios`。该项需要用户确认后才能提交，迁移没有越过用户门禁。
+
+当前仍保留的门禁：产品迁移不能替用户批准 Architecture。存在活动 Architecture Rework 时，Stage1 Review 与独立 Audit 通过后仍需用户明确批准，随后才能恢复 Stage2。

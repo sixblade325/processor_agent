@@ -68,9 +68,17 @@ export interface SharedFieldSpec {
   validUntil: string;
 }
 
+export interface ArchitectureRoleSpec {
+  id: string;
+  responsibility: string;
+}
+
 export interface GlobalProtocolSpec {
   id: string;
-  owner: string;
+  ownerRole: string;
+  producerRoles: string[];
+  consumerRoles: string[];
+  affectedResources: string[];
   rules: string[];
 }
 
@@ -106,14 +114,13 @@ export interface ProjectProfile {
   environmentChecks: CommandSpec[];
   decisions: DecisionSpec[];
   architecture: {
+    roles: ArchitectureRoleSpec[];
     systemBoundary: string[];
     supportedInstructions: string[];
     invariants: string[];
     sharedFields: SharedFieldSpec[];
     globalProtocols: GlobalProtocolSpec[];
     counterRules: CounterRuleSpec[];
-    modules: ModuleSpec[];
-    stage2Order: string[];
   };
   verification: {
     referenceModel: string;
@@ -121,10 +128,15 @@ export interface ProjectProfile {
     requiredScenarios: string[];
     counters: string[];
     decisionAcceptance: DecisionAcceptanceSpec[];
+    completionCriteria: string[];
   };
   scaffold: {
     files: ScaffoldFileSpec[];
     smokeChecks: CommandSpec[];
+  };
+  legacyArchitecture?: {
+    modules: ModuleSpec[];
+    stage2Order: string[];
   };
 }
 
@@ -298,23 +310,42 @@ export type ReviewRepairKind = "decision" | "project_spec" | "profile";
 export type ReviewFindingStatus = "open" | "superseded";
 
 export type ProjectSpecTarget =
+  | "intent.goal"
+  | "intent.useCase"
+  | "intent.constraints"
+  | "intent.exclusions"
+  | "architecture.roles"
   | "architecture.systemBoundary"
   | "architecture.supportedInstructions"
   | "architecture.invariants"
   | "architecture.sharedFields"
   | "architecture.globalProtocols"
   | "architecture.counterRules"
-  | "architecture.modules"
-  | "architecture.stage2Order"
   | "verification.referenceModel"
   | "verification.layers"
   | "verification.requiredScenarios"
   | "verification.counters"
-  | "verification.decisionAcceptance";
+  | "verification.decisionAcceptance"
+  | "verification.completionCriteria";
 
 export interface Stage1ProjectSpec {
+  intent: ProjectIntent;
   architecture: ProjectProfile["architecture"];
   verification: ProjectProfile["verification"];
+}
+
+export type FactOwnerKind = "decision" | "project_spec" | "profile";
+
+export interface FactSourceEntry {
+  factKey: string;
+  ownerKind: FactOwnerKind;
+  ownerPath: string;
+  sourceRevisionOrDigest: string;
+  renderedLocations: Array<{
+    artifact: string;
+    section: string;
+  }>;
+  mutableThrough: ReviewRepairKind;
 }
 
 export interface ArchitectureReviewFinding {
@@ -322,6 +353,7 @@ export interface ArchitectureReviewFinding {
   code: string;
   message: string;
   artifact: string;
+  factKey: string;
   relatedDecision: string;
   repairKind: ReviewRepairKind;
   repairTarget: string;
@@ -419,13 +451,13 @@ export interface ProjectSpecHistoryEvent {
 }
 
 export interface ProjectSpecHistory {
-  protocolVersion: 2;
+  protocolVersion: 2 | 3;
   baseline: ProjectSpecHistoryBaseline;
   events: ProjectSpecHistoryEvent[];
 }
 
 export interface ProjectSpecHistoryStorage {
-  protocolVersion: 2;
+  protocolVersion: 2 | 3;
   path: string;
   sha256: string;
   eventCount: number;
@@ -472,7 +504,7 @@ export interface ReviewCorrectionRecordV2 {
   evidenceCoverage: Partial<Record<ProjectSpecTarget, string[]>>;
   confirmedAt: string;
   appliedAt: string;
-  status: "applied" | "verified" | "legacy_unresolved";
+  status: "applied" | "verified" | "legacy_unresolved" | "ineffective";
   legacy: boolean;
   verifiedByAuditAggregateSha256?: string;
 }
@@ -490,6 +522,23 @@ export interface Stage1ArchitectureReworkLink {
   startedAt: string;
   reapprovedAt?: string;
   newApprovalSha256?: string;
+}
+
+export interface ProductSchemaMigrationRecord {
+  id: string;
+  migratedAt: string;
+  fromStage1SchemaVersion: number;
+  toStage1SchemaVersion: number;
+  fromProfileVersion: string;
+  toProfileVersion: string;
+  sourceStage1Revision: number;
+  targetStage1Revision: number;
+  previousApprovalSha256?: string;
+  sourceStage2SchemaVersion?: number;
+  targetStage2SchemaVersion?: number;
+  sourceStage2Revision?: number;
+  targetStage2Revision?: number;
+  retiredArtifacts: string[];
 }
 
 export interface ScaffoldRecord {
@@ -570,8 +619,8 @@ export interface Stage2TopologyDecisionSpec {
 
 export interface Stage2ImplementationUnitPlan {
   id: string;
-  kind: "architecture" | "shared";
-  architectureModules: string[];
+  kind: "implementation" | "shared";
+  architectureRoles: string[];
   responsibility: string;
   rationale: string;
   packageName: string;
@@ -616,7 +665,7 @@ export type Stage2TopologyPlanPatch =
       kind: "unit_mapping";
       units: Array<Pick<
         Stage2ImplementationUnitPlan,
-        "id" | "kind" | "architectureModules" | "responsibility" | "rationale"
+        "id" | "kind" | "architectureRoles" | "responsibility" | "rationale"
       >>;
     }
   | {
@@ -911,7 +960,7 @@ export interface Stage2ModuleState {
   id: string;
   order: number;
   status: Stage2ModuleStatus;
-  architecture: ModuleSpec;
+  architecture: Stage2UnitArchitectureContext;
   design?: Stage2DesignRecord;
   implementation?: Stage2ImplementationRecord;
   verification?: Stage2VerificationRecord;
@@ -921,6 +970,18 @@ export interface Stage2ModuleState {
     reason: string;
     previousDesignSha256?: string;
   }>;
+}
+
+export interface Stage2UnitArchitectureContext {
+  id: string;
+  architectureRoles: string[];
+  responsibility: string;
+  dependsOn: string[];
+  interfaces: string[];
+  systemBoundary: string[];
+  invariants: string[];
+  sharedFields: SharedFieldSpec[];
+  globalProtocols: GlobalProtocolSpec[];
 }
 
 export interface Stage2AgentAssignment {
@@ -1008,14 +1069,14 @@ export interface Stage2LegacyProjectStage {
   initializedAt: string;
   updatedAt: string;
   moduleOrder: string[];
-  modules: Record<string, Stage2ModuleState>;
+  modules: Record<string, Omit<Stage2ModuleState, "architecture"> & { architecture: ModuleSpec }>;
   agents: Record<Stage2AgentSlot, Stage2AgentAssignment>;
   blockers: string[];
   history: Stage2HistoryEvent[];
 }
 
 export interface Stage2ProjectStage {
-  schemaVersion: 2;
+  schemaVersion: 3;
   status: Stage2Status;
   revision: number;
   stateEpoch: number;
@@ -1032,17 +1093,17 @@ export interface Stage2ProjectStage {
 }
 
 export interface Stage2TaskEnvelope {
-  schemaVersion: 2;
+  schemaVersion: 3;
   task: Stage2AgentTask;
   project: {
     name: string;
     root: string;
   };
-  module?: ModuleSpec;
+  module?: Stage2UnitArchitectureContext;
   unit?: Stage2ImplementationUnitPlan;
   topology?: {
     decision: Stage2TopologyDecisionSpec;
-    architectureModules: ModuleSpec[];
+    architectureRoles: ArchitectureRoleSpec[];
     confirmedDecisions: Array<{
       id: string;
       conclusion: string;
@@ -1178,7 +1239,7 @@ export interface Stage2Summary {
   };
   board: Array<{
     unitId: string;
-    architectureModules: string[];
+    architectureRoles: string[];
     dependsOn: string[];
     wave: number | null;
     status: Stage2ModuleStatus | "PLANNED";
@@ -1213,7 +1274,7 @@ export interface Stage1ProjectState {
     revision: number;
     createdAt: string;
     updatedAt: string;
-    intent: ProjectIntent;
+    intent?: ProjectIntent;
     decisions: Record<string, DecisionState>;
     environment: CommandResult[];
     projectSpec?: Stage1ProjectSpec;
@@ -1227,6 +1288,7 @@ export interface Stage1ProjectState {
     approval?: ApprovalRecord;
     approvalHistory?: ApprovalRecord[];
     architectureRework?: Stage1ArchitectureReworkLink;
+    productMigrations?: ProductSchemaMigrationRecord[];
     architectureReworkHistory?: Stage1ArchitectureReworkLink[];
     scaffold?: ScaffoldRecord;
     blockers: string[];
@@ -1256,7 +1318,7 @@ export interface Stage1Summary {
   nextAction?: Stage1NextAction;
   blockers: string[];
   approvalCurrent: boolean;
-  projectSpecProtocolVersion: 1 | 2;
+  projectSpecProtocolVersion: 1 | 2 | 3;
   projectSpecHistoryEvents: number;
   legacyUnresolvedCorrections: number;
   architectureRework?: Stage1ArchitectureReworkLink;

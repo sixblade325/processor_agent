@@ -16,7 +16,9 @@ import {
   researchRequestFingerprint,
   type ResearchRequestInput,
 } from "./research.js";
+import { effectiveProjectSpec } from "./stage1/project-spec.js";
 import { renderDecisionPacket } from "./render.js";
+import { buildFactSourceIndex } from "./stage1/project-spec.js";
 import {
   currentGeneratedAggregate,
   findNextDecision,
@@ -252,7 +254,7 @@ async function prepareWorkspaceAgent(projectPath: string): Promise<{ root: strin
 9. 用户修正已经回答或 deferred 的 Decision 时，先运行 \`processor-agent stage1 reopen . <decision-id> --reason <修正原因>\`。Harness 会保留此前结论的修正记录，并把全部传递依赖 Decision 重置为 pending。随后重新查询 \`status\` 和 \`next\`。修正模式以此前结论为基线，Profile 选项只作参考；不得因重开而丢弃未被新证据否定的既有内容。
 10. 只有非 blocking Decision 且用户明确要求延期时，才运行 \`processor-agent stage1 defer\`。推荐选项和修订结论均需用户明确确认。
 11. kind=review_finding 时只处理该 finding。repairKind=decision 时和用户闭合修订结论，得到明确确认后运行 \`stage1 reopen\`；repairKind=project_spec 时读取当前正式草案，形成包含 patch、rationale、evidenceSources 和 evidenceCoverage 的 Correction Proposal。向用户展示以 changed target 为单位的语义差异、每个 target 的证据和影响，得到明确确认后运行 \`processor-agent stage1 correct . <finding-code> --proposal-json <json>\`；repairKind=profile 时报告通用 Profile 缺陷，修复框架 Profile 后运行 \`profile-refresh\`。不得把 relatedDecision 当作 repairKind。
-12. Review Correction 只能替换 \`architecture.systemBoundary\`、\`architecture.supportedInstructions\`、\`architecture.invariants\`、\`architecture.sharedFields\`、\`architecture.globalProtocols\`、\`architecture.counterRules\`、\`architecture.modules\`、\`architecture.stage2Order\`、\`verification.referenceModel\`、\`verification.layers\`、\`verification.requiredScenarios\`、\`verification.counters\`、\`verification.decisionAcceptance\` 的完整字段值。每个 changed target 都必须由 evidenceCoverage 指向当前有效 Evidence。\`.assistant/reviews/stage1.json\` 只属于 Harness 自动生成的 findingSource，不能作为 evidenceSources。不得直接编辑生成文档。相同根因的 finding 可以在一次 correct 中合并，其余情况每轮只处理一个。
+12. Review Correction 只能替换 \`intent.goal\`、\`intent.useCase\`、\`intent.constraints\`、\`intent.exclusions\`、\`architecture.systemBoundary\`、\`architecture.supportedInstructions\`、\`architecture.invariants\`、\`architecture.sharedFields\`、\`architecture.globalProtocols\`、\`architecture.counterRules\`、\`verification.referenceModel\`、\`verification.layers\`、\`verification.requiredScenarios\`、\`verification.counters\`、\`verification.decisionAcceptance\`、\`verification.completionCriteria\` 的完整字段值。每个 changed target 都必须由 evidenceCoverage 指向当前有效 Evidence。\`.assistant/reviews/stage1.json\` 只属于 Harness 自动生成的 findingSource，不能作为 evidenceSources。不得直接编辑生成文档。相同根因的 finding 可以在一次 correct 中合并，其余情况每轮只处理一个。
 13. Correction Evidence 引用 Decision 时携带当前 Stage1 revision，引用项目文档时携带当前 SHA-256，引用 Research 时携带当前 fingerprint，引用 Profile 时携带当前 digest。user_directive 必须保存完整可独立理解的规则。Evidence 漂移时重新读取来源并重建 Proposal。
 14. 修正后必须重新运行 \`review\` 和独立 \`audit\`。旧 finding 只能标记为 superseded。只有当前文档哈希的 audit pass 且 Review Correction 均为 verified 时才可 approve。Profile refresh 默认保留 overriddenTargets；只有用户明确要求交还 Profile 管理时才运行 \`stage1 release-override\`。
 15. \`review\`、\`audit\`、\`approve\`、\`scaffold\` 和 \`complete\` 必须按当前状态调用对应 Harness 命令。\`approve\` 必须得到用户在查看审查结果后的明确批准。
@@ -264,7 +266,7 @@ async function prepareWorkspaceAgent(projectPath: string): Promise<{ root: strin
 1. \`status --json\`、\`next --json\`、audit JSON 和 Correction Proposal JSON 只作为机器输入。回复中不得粘贴原始 JSON、YAML、完整对象或完整数组。
 2. 每轮只展示当前动作需要的信息，顺序为状态摘要、当前 finding 或 Decision、语义差异、Evidence、影响和一个确认问题。已经完成的动作使用一行结果概括。
 3. Review Correction 的字符串数组使用“新增、删除、顺序变化”表示。带 \`id\`、\`name\` 或 \`decisionId\` 的集合只列新增、删除和修改的实体，省略未变化实体。
-4. \`architecture.modules\` 按 Module ID 展示。每个变化 Module 只列动作以及 \`responsibility\`、\`stateOwnership\`、\`dependsOn\`、\`interfaces\` 的变化；禁止输出完整 modules 数组。内容较多时先给 Module 级摘要，再按用户点名展开一个 Module。
+4. \`architecture.globalProtocols\` 按 Protocol ID 展示，只列变化的角色、规则和影响，不回显完整数组。
 5. 标量或短文本显示旧值和新值。长文本显示结论变化和受影响规则，保留正式文档路径供核对。
 6. Evidence 使用“target -> Evidence ID -> 来源与主张”的短表或短列表。Evidence 原始对象和 digest 不进入正文，用户要求核验时再显示对应定位信息。
 7. Correction 应用后只报告 Correction ID、changed targets、更新的正式文档、Stage1 revision 和下一个 action。不得回显已经提交的 Proposal。
@@ -350,7 +352,7 @@ export async function researchDecision(
     loaded.root,
     buildResearchPrompt(
       loaded.root,
-      loaded.state.stage1.intent.goal,
+      effectiveProjectSpec(loaded.state, loaded.loadedProfile.profile).intent.goal,
       decision,
       loaded.state,
       request,
@@ -682,22 +684,28 @@ export async function auditStage1Architecture(
   for (const path of Object.keys(loaded.state.stage1.generatedDocumentHashes).sort()) {
     documents.push(`\n<document path="${path}">\n${await readText(resolve(loaded.root, path))}</document>\n`);
   }
+  const factSources = buildFactSourceIndex(loaded.state, loaded.loadedProfile.profile);
   const prompt = `你是 Chisel 处理器项目的独立只读 Stage1 架构审查 Agent。只使用下方提供的文档，不调用工具，不修改文件。所有自然语言输出使用简体中文，标识符、路径和代码保持原样。
 
 审查标准：
-1. 每个 blocking 决策都一致反映在 Architecture、Module Manifest 和 Verification Plan 中。
-2. ISA 与系统边界、流水线与发射语义、模块所有权、全局 stall、flush、redirect、exception、kill、backpressure 和验证门禁已经充分闭合，可以进入 Stage2。
+1. 每个 blocking 决策都一致反映在 Architecture Overview 和 Verification Plan 中。
+2. ISA 与系统边界、流水线与发射语义、全局 stall、flush、redirect、exception、kill、backpressure 和验证门禁已经充分闭合，可以进入 Stage2 Topology Planning。
 3. 推荐方案不能写成已批准事实。
-4. 模块依赖与职责一致。
+4. Stage1 不决定 Implementation Unit、Chisel Module、源码路径、接口 owner、DAG 或实施 wave。
 5. 影响正确性或接口的未决项属于 error。Stage2 的模块内部实现细节不属于 error。
 6. 只有 Stage2 无需自行发明全局架构规则时才能返回 pass。
 7. ARCHITECTURE_REVIEW 阶段的正式文档保持草案状态，独立审查通过并由用户批准后才晋升为已批准。草案状态本身不构成 finding。
-8. 每个 finding 必须分类 repairKind。已有用户 Decision 结论需修正时使用 decision；当前项目的 Architecture、Module Manifest、共享字段、全局协议或 Verification Contract 需补充时使用 project_spec；对所有同 Profile 项目均成立的模板错误使用 profile。
-9. decision finding 的 repairTarget 使用 Decision ID，且 relatedDecision 使用同一 ID。project_spec finding 的 repairTarget 只能使用 architecture.systemBoundary、architecture.supportedInstructions、architecture.invariants、architecture.sharedFields、architecture.globalProtocols、architecture.counterRules、architecture.modules、architecture.stage2Order、verification.referenceModel、verification.layers、verification.requiredScenarios、verification.counters、verification.decisionAcceptance。profile finding 的 repairTarget 使用 profile.* 路径。
+8. 每个 finding 必须引用下方 Fact Source Index 中存在的 factKey。不得根据文档措辞猜测事实所有者。
+9. decision fact 使用 repairKind=decision 和 Decision ID repairTarget。project_spec fact 使用 repairKind=project_spec 和 factKey repairTarget。profile fact 使用 repairKind=profile 和 profile.<factKey> repairTarget。repairKind 和 repairTarget 必须与 Fact Source Index 的 mutableThrough 一致。
 10. requiredClosure 列出修正后必须闭合的可检查事项。新 finding 的 status 固定为 open。任何 finding 均令 verdict 为 fail，pass 时 findings 必须为空。
+11. 每个 finding code 必须是非空且唯一的稳定标识符。多个 finding 属于同一类问题时也必须使用不同 code。
 
 reviewedAggregateSha256 必须严格等于：${aggregate}
 没有单一关联决策时，relatedDecision 使用空字符串。relatedDecision 不能代替 repairKind。
+
+<fact-source-index>
+${JSON.stringify(factSources, null, 2)}
+</fact-source-index>
 ${documents.join("\n")}`;
   const result = spawnSync(
     "codex",
@@ -848,6 +856,7 @@ function reviewSchema(aggregate: string): object {
             "code",
             "message",
             "artifact",
+            "factKey",
             "relatedDecision",
             "repairKind",
             "repairTarget",
@@ -859,6 +868,7 @@ function reviewSchema(aggregate: string): object {
             code: { type: "string" },
             message: { type: "string" },
             artifact: { type: "string" },
+            factKey: { type: "string" },
             relatedDecision: { type: "string" },
             repairKind: { type: "string", enum: ["decision", "project_spec", "profile"] },
             repairTarget: { type: "string" },
@@ -1034,5 +1044,25 @@ function validateReview(value: unknown, aggregate: string): ArchitectureReviewRe
   if (report.verdict === "pass" && report.findings.length > 0) {
     throw new Error("Codex architecture review passed while reporting findings");
   }
-  return report;
+  return normalizeArchitectureReviewFindingCodes(report);
+}
+
+export function normalizeArchitectureReviewFindingCodes(
+  report: ArchitectureReviewReport,
+): ArchitectureReviewReport {
+  const normalized = structuredClone(report);
+  const used = new Set<string>();
+  for (let index = 0; index < normalized.findings.length; index += 1) {
+    const finding = normalized.findings[index]!;
+    const base = finding.code.trim() || `ARCH_FINDING_${String(index + 1).padStart(3, "0")}`;
+    let code = base;
+    let suffix = 2;
+    while (used.has(code)) {
+      code = `${base}_${String(suffix)}`;
+      suffix += 1;
+    }
+    finding.code = code;
+    used.add(code);
+  }
+  return normalized;
 }

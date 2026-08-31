@@ -1,5 +1,5 @@
-import { stringify } from "yaml";
 import { readText, resolveWithin } from "./io.js";
+import { effectiveProjectSpec } from "./stage1/project-spec.js";
 import {
   REVISE_PREVIOUS_OPTION_ID,
   decisionRevisionContext,
@@ -9,13 +9,11 @@ import type {
   DecisionOption,
   DecisionSpec,
   ProjectProfile,
-  Stage1ProjectSpec,
   Stage1ProjectState,
 } from "./types.js";
 
 export const CORE_DOCUMENT_PATHS = [
   "architecture/overview.md",
-  "architecture/modules.yaml",
   "verification/plan.md",
 ] as const;
 
@@ -26,7 +24,6 @@ export async function renderFormalDocuments(
 ): Promise<Record<string, string>> {
   const documents: Record<string, string> = {
     "architecture/overview.md": renderArchitectureOverview(state, profile),
-    "architecture/modules.yaml": renderModuleManifest(state, profile),
     "verification/plan.md": renderVerificationPlan(state, profile),
   };
   const research = await renderResearchMemo(projectRoot, state, profile);
@@ -105,15 +102,15 @@ function renderArchitectureOverview(
     "",
     "## 项目意图",
     "",
-    `目标：${state.stage1.intent.goal}`,
+    `目标：${spec.intent.goal}`,
     "",
-    `使用场景：${state.stage1.intent.useCase}`,
+    `使用场景：${spec.intent.useCase}`,
     "",
     "约束：",
-    ...state.stage1.intent.constraints.map((item) => `- ${item}`),
+    ...spec.intent.constraints.map((item) => `- ${item}`),
     "",
     "排除项：",
-    ...state.stage1.intent.exclusions.map((item) => `- ${item}`),
+    ...spec.intent.exclusions.map((item) => `- ${item}`),
     "",
     "## 工程环境",
     "",
@@ -133,6 +130,12 @@ function renderArchitectureOverview(
   lines.push("## 系统边界");
   lines.push("");
   lines.push(...spec.architecture.systemBoundary.map((item) => `- ${item}`));
+  lines.push("");
+  lines.push("## 架构角色");
+  lines.push("");
+  lines.push(...spec.architecture.roles.map((role) =>
+    `- \`${role.id}\`：${role.responsibility}`
+  ));
   lines.push("");
   lines.push("## 支持的指令");
   lines.push("");
@@ -212,7 +215,10 @@ function renderArchitectureOverview(
   for (const protocol of spec.architecture.globalProtocols) {
     lines.push(`### ${protocol.id}`);
     lines.push("");
-    lines.push(`责任模块：${protocol.owner}`);
+    lines.push(`责任角色：${protocol.ownerRole}`);
+    lines.push(`生产角色：${protocol.producerRoles.join("、") || "无"}`);
+    lines.push(`消费角色：${protocol.consumerRoles.join("、") || "无"}`);
+    lines.push(`受影响资源：${protocol.affectedResources.join("、") || "无"}`);
     lines.push("");
     lines.push(...protocol.rules.map((item) => `- ${item}`));
     lines.push("");
@@ -253,47 +259,6 @@ function renderArchitectureOverview(
     }
   }
   return `${lines.join("\n")}\n`;
-}
-
-function renderModuleManifest(state: Stage1ProjectState, profile: ProjectProfile): string {
-  const spec = effectiveProjectSpec(state, profile);
-  const approved = ["ARCHITECTURE_APPROVED", "PROJECT_SCAFFOLDED", "STAGE1_COMPLETE"].includes(
-    state.stage1.status,
-  );
-  return stringify(
-    {
-      schemaVersion: 1,
-      documentLanguage: "zh-CN",
-      status: approved ? "approved" : "draft",
-      profile: {
-        id: profile.id,
-        version: profile.version,
-      },
-      systemBoundary: spec.architecture.systemBoundary,
-      supportedInstructions: spec.architecture.supportedInstructions,
-      decisions: profile.decisions.map((decision) => {
-        const decisionState = state.stage1.decisions[decision.id];
-        const option = selectedOption(decision, state);
-        return {
-          id: decision.id,
-          topic: decision.topic,
-          status: decisionState?.status ?? "pending",
-          selection: option?.id ?? (decisionState?.customAnswer === undefined ? null : "custom"),
-          summary: option?.summary ?? decisionState?.customAnswer ?? null,
-          consequences: option?.consequences ?? [],
-        };
-      }),
-      sharedFields: spec.architecture.sharedFields,
-      globalProtocols: spec.architecture.globalProtocols,
-      counterRules: spec.architecture.counterRules,
-      decisionAcceptance: spec.verification.decisionAcceptance,
-      dependencySemantics:
-        "dependsOn 记录模块消费的其他模块契约，允许经过寄存边界的反馈依赖；stage2Order 定义实施顺序。",
-      modules: spec.architecture.modules,
-      stage2Order: spec.architecture.stage2Order,
-    },
-    { lineWidth: 0 },
-  );
 }
 
 function renderVerificationPlan(
@@ -353,21 +318,8 @@ function renderVerificationPlan(
   lines.push("");
   lines.push("## Stage2 完成门禁");
   lines.push("");
-  lines.push("- 每个 baseline 模块都通过对应定向测试。");
-  lines.push("- 架构轨迹与选定参考策略一致。");
-  lines.push("- 必需计数器均可观测，并遵守文档规定的计数规则。");
-  lines.push("- 集成测试覆盖 stall、redirect、trap 和双发射行为。");
+  lines.push(...spec.verification.completionCriteria.map((item) => `- ${item}`));
   return `${lines.join("\n")}\n`;
-}
-
-function effectiveProjectSpec(
-  state: Stage1ProjectState,
-  profile: ProjectProfile,
-): Stage1ProjectSpec {
-  return state.stage1.projectSpec ?? {
-    architecture: profile.architecture,
-    verification: profile.verification,
-  };
 }
 
 async function renderResearchMemo(

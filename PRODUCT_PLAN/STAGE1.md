@@ -1,40 +1,42 @@
 # Stage1 Project Bootstrap 计划
 
-状态：首个 CLI 版本已实现，`dual_issue_demo` 已完成 Stage1
+状态：Stage1 schemaVersion 2 已实现，`dual_issue_demo` 已迁移并进入重新审查
 
 上位文档：[PRODUCT_PLAN.md](./PRODUCT_PLAN.md)
 
-更新时间：2026-08-30
+更新时间：2026-08-31
 
 ## 1. 阶段目标
 
-Stage1 将用户的处理器目标转化为可以直接进入模块开发的 Project Blueprint，并建立可恢复的项目工作区。
+Stage1 让用户与助手通过调研、追问和逐项确认，形成一份用户批准的处理器总体架构定义，并建立可恢复的项目工作区。
 
 ```text
 用户目标
 -> 必要调研
 -> 全局架构决策
--> Architecture Snapshot
+-> Processor Architecture Snapshot
 -> 项目骨架
 -> Stage2 Topology Planning 输入
 ```
 
-Stage1 负责全局 Architecture、Architecture Module 职责、共享语义边界、项目级验证策略和用户批准。Implementation Unit 划分、Interface owner、源码拓扑、实施 DAG、模块内部状态机、具体 Chisel 实现、完整测试开发和 baseline 集成进入 Stage2。性能优化进入 Stage3。
+Stage1 负责目标与约束、全局 Architecture、Architecture Role、共享语义、项目级验证策略和用户批准。Architecture Role 只标识稳定的架构职责，不预先决定 Chisel Module 或 Implementation Unit 边界。Implementation Unit 划分、Interface owner、源码拓扑、实施 DAG、模块内部状态机、具体 Chisel 实现、完整测试开发和 baseline 集成进入 Stage2。性能优化进入 Stage3。
 
 `STAGE1_COMPLETE` 表示：
 
 1. 全局架构已经批准。
 2. 工具链和项目骨架可以进入开发。
-3. Architecture Module Manifest 和共享约束足以启动 Stage2 Topology Decision Loop。
+3. Architecture Role、全局语义和完成条件足以启动 Stage2 Topology Decision Loop，Stage2 无需发明总体行为。
 4. baseline RTL 尚不要求完成。
 
 ## 1.1 当前实现快照
 
-截至 2026-08-30，Stage1 已实现 Profile 驱动的初始化、环境探测、决策依赖图、Decision 级 Research Task、指纹缓存与显式刷新、Decision 修正、正式文档同步、独立架构审查、Review Correction v2、批准哈希、项目骨架生成、WSL smoke check、未批准 Profile 更新、Stage2 Architecture Rework 返回入口和 Workspace Agent 自然语言入口。
+截至 2026-08-31，Stage1 已实现 Profile 驱动的初始化、环境探测、决策依赖图、Decision 级 Research Task、指纹缓存与显式刷新、Decision 修正、正式文档同步、独立架构审查、Review Correction v2、批准哈希、项目骨架生成、WSL smoke check、未批准 Profile 更新、Stage2 Architecture Rework 返回入口和 Workspace Agent 自然语言入口。
 
-`dual_issue_demo` Profile `0.7.0` 已为八个 Decision 声明 `researchPolicy`。隔离端到端运行通过独立架构审查且无 finding，并在 WSL 中通过 SBT 编译。实际 `E:\107\dual_issue_demo` 已迁移到 `0.7.0`，并已覆盖完整决策、Architecture audit、Decision reopen、重新调研和修订结论提交。
+`dual_issue_demo` Profile 已升级到 `0.8.0`。新 Profile 删除 Stage1 Module Manifest 和 `stage2Order`，将项目意图纳入 ProjectSpec，将全局协议绑定到 Architecture Role，并把 Stage2 完成条件移入 Verification ProjectSpec。
 
-当前 Profile 和 Schema 仍保留 `architecture.stage2Order`。该字段在旧 Stage2 中直接驱动实施，已确认需要迁移。新语义只允许把它作为 Architecture Module 的确定性展示顺序和 Topology Planner 的初始讨论线索，不能作为用户已批准的 Implementation Topology。
+实际项目迁移后为 Stage1 revision 144 `REVIEW_CORRECTION`。确定性 Review 已通过，独立 Audit 发现 `verification.requiredScenarios` 尚未覆盖 reset 释放及 drain 完成后从 `0x80000000` 重新取指。该 finding 需要用户确认 Review Correction，不能由迁移命令自动批准。
+
+Stage1 schemaVersion 2 已删除 `architecture.modules` 和 `architecture.stage2Order`。旧项目只能通过顶层 `migrate --dry-run|--apply` 显式迁移，旧 Module Manifest 不再作为当前架构事实。
 
 当前恢复能力覆盖正常关闭后从 `.assistant/project.yaml`、ProjectSpec history sidecar 和 Profile 快照继续执行，也支持修正未批准 Decision，以及由 Stage2 发起的已批准 Architecture Rework。重开后的 Decision 以此前结论为修订基线，旧 advice 自动失效，Research 与 Synthesis 必须围绕修正原因形成完整修订候选。命令中断期间的通用多文件事务恢复、自由形式 discovery 与 synthesis、本地 Web 界面进入后续实现。
 
@@ -76,12 +78,12 @@ Stage1 的最小输入：
 | 系统边界 | 复位入口、地址宽度、存储接口、MMIO、时钟复位和外部中断 |
 | 宏观执行模型 | 顺序或乱序、发射与退休宽度、流水边界和操作延迟分类 |
 | 全局控制 | stall、flush、redirect、exception、kill 和 backpressure 语义 |
-| Module Map | 稳定 Module ID、职责、状态所有权、契约消费关系和共享架构边界 |
-| 共享协议 | 跨模块接口及共享流水字段的语义、生产者、消费者和有效区间 |
+| Architecture Role | 稳定的架构职责名称和责任描述，不规定实现模块边界 |
+| 共享语义 | 全局协议、共享流水字段的语义、架构角色、生产者、消费者和有效区间 |
 | 验证策略 | 参考模型、定向测试、集成测试、性能计数器和完成条件 |
 | 未决事项 | blocking 或 deferred 分类、负责人、影响范围和最迟决策点 |
 
-模块内部字段只在影响跨模块接口或全局正确性时进入 Stage1。其余字段在对应模块进入 Stage2 后闭合。
+实现模块内部字段不进入 Stage1。影响全局正确性的字段在 Stage1 记录架构语义和角色关系，具体存储位置、接口和 owner 在 Stage2 闭合。
 
 ## 5. 调研流程
 
@@ -198,7 +200,7 @@ Decision Packet 必须给出实际后果和受影响文档。只列选项、不�
 
 ### 6.4 批准绑定
 
-单项决策批准记录 Decision ID、用户回答、对应文档位置、revision 和内容哈希。最终 Stage1 批准绑定 Architecture、Module Map、验证计划和决策记录的聚合哈希。
+单项决策批准记录 Decision ID、用户回答、对应文档位置、revision 和内容哈希。最终 Stage1 批准绑定 Architecture、Research Memo、Verification Plan 和决策记录的聚合哈希。
 
 批准后修改受保护内容时，状态进入 `NEEDS_REVISION`。旧批准不能继续用于生成项目骨架或启动 Stage2。
 
@@ -209,21 +211,21 @@ Architecture audit finding 按修正所有者分为三类：
 | `repairKind` | 适用范围 | 修正入口 |
 |---|---|---|
 | `decision` | 已有用户决策的结论、约束或适用范围错误 | `stage1 reopen` |
-| `project_spec` | 用户项目的 Module Manifest、共享字段、全局协议、Verification Contract 或验收数据缺失 | Review Correction |
+| `project_spec` | 用户项目的 Intent、Architecture Role、共享语义、全局协议、Verification Contract 或验收数据缺失 | Review Correction |
 | `profile` | 对所有使用该 Profile 的项目都成立的通用模板错误 | 修改框架 Profile 后执行 `profile-refresh` |
 
-`project_spec` 修正使用逻辑实体 `Review Correction`。当前 ProjectSpec、Correction compact index 和 sidecar 元数据保存在现有 `.assistant/project.yaml`，ProjectSpec baseline 与增量事件保存在同目录的内容寻址压缩 sidecar。第一版不新增用户正式目录和正式文档。Harness 根据修正结果重新生成现有 `architecture/overview.md`、`architecture/modules.yaml` 和 `verification/plan.md`。
+`project_spec` 修正使用逻辑实体 `Review Correction`。当前 ProjectSpec、Correction compact index 和 sidecar 元数据保存在现有 `.assistant/project.yaml`，ProjectSpec baseline 与增量事件保存在同目录的内容寻址压缩 sidecar。第一版不新增用户正式目录和正式文档。Harness 根据修正结果重新生成 `architecture/overview.md`、`research/stage1.md` 和 `verification/plan.md`。
 
 每个 finding 至少记录：
 
 ```yaml
-code: PIPELINE_MANIFEST_INCOMPLETE
+code: ARCH_ROLE_RESPONSIBILITY_INCOMPLETE
 repairKind: project_spec
-repairTarget: architecture.modules
+repairTarget: architecture.roles
 relatedDecision: S1_DEC_003
 requiredClosure:
-  - Instruction Queue state owner
-  - hold、kill、release 和 reuse 规则
+  - Instruction delivery 的稳定架构职责
+  - 与 redirect、hold 和 release 的全局语义关系
 status: open
 ```
 
@@ -240,7 +242,7 @@ Review Correction 必须满足以下规则：
 9. Audit report 只能作为 findingSource。Decision、项目文档、Research、Profile 和用户新指令作为 Evidence 时必须通过 revision、digest、fingerprint 或完整指令校验。
 10. Profile refresh 与 Review Correction 共用 ProjectSpec event chain。项目覆盖字段默认保留，只有显式 `release-override` 才交还 Profile 管理。
 11. v1 Correction 只通过显式 `correction-migrate --dry-run|--apply` 迁移。旧记录缺少 Evidence 时标记为 `legacy_unresolved`，不伪造依据，也不使既有 approval 失效。
-12. 用户确认界面只展示语义差异。字符串数组显示新增、删除和顺序变化；结构化集合按稳定 ID 显示新增、删除和字段变化；`architecture.modules` 按 Module ID 展示。原始 Proposal JSON 和未变化实体不进入用户正文。
+12. 用户确认界面只展示语义差异。字符串数组显示新增、删除和顺序变化；结构化集合按稳定 ID 显示新增、删除和字段变化；`architecture.roles` 按 Role ID 展示。原始 Proposal JSON 和未变化实体不进入用户正文。
 
 审查修正闭环为：
 
@@ -262,7 +264,7 @@ Stage1 按以下主题推进：
 目标与环境
 -> ISA 与系统边界
 -> 流水线与执行模型
--> 模块与共享协议
+-> 架构角色与共享语义
 -> 验证与 Stage2 Planning 输入
 -> 全量审阅
 ```
@@ -279,7 +281,7 @@ Stage1 按以下主题推进：
 8. 修正后重新读取 `status` 和 `next`。`next` 必须携带此前结论、修正原因和完整修订候选，Profile 默认推荐不得覆盖此前讨论结果。
 9. `revise_previous` 只能通过 `custom` 提交 `proposedCustomAnswer`，并继续受显式用户确认门禁约束。
 10. Audit finding 按 6.5 节进入对应修正入口。`relatedDecision` 不能替代 `repairKind`，没有 Decision owner 的项目事实不得强行通过 `reopen` 修正。
-11. 最终审阅展示已确认事项、deferred 项、open finding、生成预览、Architecture Module Manifest 和 Stage2 Topology Planning 输入。
+11. 最终审阅展示已确认事项、deferred 项、open finding、生成预览、Architecture Role 和 Stage2 Topology Planning 输入。
 
 用户始终面对一个 Workspace Agent。Harness 拥有交互状态、问题队列、审批和恢复逻辑。Codex CLI 通过结构化任务生成调研、方案和文档更新。
 
@@ -344,7 +346,6 @@ Stage1 使用逻辑产物定义职责，实际文件按首次内容创建，不�
 | Project State | `.assistant/project.yaml` | Profile、当前状态、revision、决策索引、Correction compact index、sidecar 元数据和哈希 |
 | ProjectSpec History | `.assistant/project-spec-history-<hash>.json.gz` | 内容寻址的 baseline、领域增量事件和重放哈希 |
 | Architecture Overview | `architecture/overview.md` | 目标、ISA、系统边界、流水线、全局规则和不变量 |
-| Module Manifest | `architecture/modules.yaml` | Module ID、职责、状态所有权、契约消费关系和共享接口 |
 | Decision Record | `architecture/overview.md` 或独立 ADR | 已批准选择、理由、影响和来源引用 |
 | Stage1 Research Memo | `research/` | 来源索引、机制比较和被采用结论 |
 | Verification Plan | `verification/` | 参考模型、测试层级、计数器和完成条件 |
@@ -360,8 +361,8 @@ Stage1 使用逻辑产物定义职责，实际文件按首次内容创建，不�
 2. 工具链、执行位置、构建入口和验证入口已经确定。
 3. ISA Profile 与系统边界已经批准。
 4. 执行模型、流水边界、发射与退休规则已经批准。
-5. Module Map、Module ID、职责、状态所有权和契约消费关系已经批准。
-6. 跨模块协议与共享流水字段已经闭合。
+5. Architecture Role 及其职责已经批准，且未预先绑定 Implementation Unit 或 Chisel Module。
+6. 全局协议与共享流水字段的架构语义已经闭合。
 7. 全局 stall、flush、redirect、exception、kill 和 backpressure 语义已经闭合。
 8. 必需调研具有来源，可采用结论已经进入正式文档。
 9. 所有 blocking 决策已经闭合，deferred 决策具有最迟决策点。
@@ -384,9 +385,9 @@ Stage1 至少引导用户闭合以下主题：
 5. 控制流、访存和多周期操作限制。
 6. flush、stall、forwarding 和 retirement 的全局语义。
 7. 参考模型、定向测试、小型 benchmark 和性能计数器。
-8. Architecture Module 职责、状态所有权、共享协议和允许 Stage2 讨论的实现自由度。
+8. Architecture Role、共享语义和允许 Stage2 讨论的实现自由度。
 
-baseline 禁止 `lane0 -> lane1` 同拍 RAW 配对属于需要用户批准的架构决策。该决定必须同时写入 Architecture Overview、发射模块边界和验证计划。
+baseline 禁止 `lane0 -> lane1` 同拍 RAW 配对属于需要用户批准的架构决策。该决定必须同时写入 Architecture Overview 和 Verification Plan；具体发射 Unit 和接口边界由 Stage2 确定。
 
 ## 13. Stage1 开发顺序
 
@@ -410,7 +411,7 @@ baseline 禁止 `lane0 -> lane1` 同拍 RAW 配对属于需要用户批准的架
 5. 修改已批准 Architecture 后批准自动失效。
 6. Agent 推荐能够追溯到项目事实或调研来源。
 7. Stage1 不生成未经批准的 baseline RTL。
-8. 新 Agent 可以根据产物生成正确的 Stage2 首模块任务包。
+8. 新 Agent 可以根据产物生成正确的 Stage2 首个 Topology Decision Task Envelope。
 9. Audit 发现 Decision 之外的项目事实缺口时，可以在不手工编辑生成文档、不修改通用 Profile 的情况下完成项目级修正。
 10. 每项 Review Correction 可以追溯到 finding、用户确认、结构化字段变化和重新审查结果。
 

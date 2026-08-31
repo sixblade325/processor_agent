@@ -4,7 +4,7 @@
 
 Processor Agent 是本地运行的处理器开发工作流 Harness。它负责保存阶段状态、组织架构决策、调用 Codex CLI、生成正式文档、执行门禁，并在批准后建立 Chisel 项目骨架。
 
-当前可用范围是 Stage1 Project Bootstrap 和 Stage2 Module Development Loop。Stage3 优化闭环和本地 Web 工作台仍在开发。
+当前可用范围是 Stage1 Architecture Definition 和 Stage2 Topology 与 Unit Development Loop。Stage3 优化闭环和本地 Web 工作台仍在开发。
 
 ## 2. 文件职责
 
@@ -26,14 +26,14 @@ processor_agent/
 user_project/
 ├── AGENTS.md                 项目协作约束
 ├── architecture/
-│   ├── overview.md           整核架构事实和决策
-│   └── modules.yaml          Architecture Module 职责、状态所有权和契约关系
+│   └── overview.md           整核架构事实、Architecture Role 和决策
 ├── design/                   Stage2 Implementation Plan 与 Unit Design，按需创建
-├── research/                 来源化调研结论，按需创建
+├── research/
+│   └── stage1.md             Stage1 来源化调研结论
 ├── src/                      Chisel 源码和测试，按 Design 生成
 ├── verification/
 │   ├── plan.md               验证策略和完成门禁
-│   └── <module>.md           模块验证记录，按需创建
+│   └── <unit>.md             Unit 验证记录，按需创建
 └── .assistant/
     ├── project.yaml          Stage1/Stage2 当前状态、revision、哈希和历史索引
     ├── project-spec-history-<hash>.json.gz
@@ -77,11 +77,11 @@ node dist\src\cli.js stage1 init E:\107\my_core --profile dual_issue_demo
 初始化会：
 
 1. 保留已有 `AGENTS.md` 和 `.gitignore`。
-2. 拒绝覆盖已有 `architecture/overview.md`、`architecture/modules.yaml` 和 `verification/plan.md`。
+2. 拒绝覆盖已有 `architecture/overview.md` 和 `verification/plan.md`。
 3. 在缺少 Git 仓库时执行 `git init`。
 4. 保存 Profile 快照和机器状态。
 5. 执行 Profile 声明的环境探测。
-6. 生成中文 Architecture、Module Manifest 和 Verification Plan 草案。
+6. 生成中文 Architecture、Research Memo 和 Verification Plan 草案。
 
 查看状态和下一个决策：
 
@@ -201,15 +201,15 @@ Audit finding 包含 `repairKind`、`repairTarget`、`requiredClosure` 和 `stat
 2. `project_spec`：确认字段语义差异、理由、Evidence 和覆盖关系后使用 `stage1 correct`。
 3. `profile`：修复通用 Profile 后使用 `stage1 profile-refresh`。
 
-`project_spec` 修正只允许替换 Architecture 或 Verification 的受控完整字段，不接受生成文档文本补丁。Workspace Agent 会从当前失败 audit 自动取得 `findingSource`，用户确认的 Proposal 需要提供 `patch`、`rationale`、`evidenceSources` 和每个修改目标的 `evidenceCoverage`。CLI 示例：
+`project_spec` 修正只允许替换 Intent、Architecture 或 Verification 的受控完整字段，不接受生成文档文本补丁。Workspace Agent 会从当前失败 audit 自动取得 `findingSource`，用户确认的 Proposal 需要提供 `patch`、`rationale`、`evidenceSources` 和每个修改目标的 `evidenceCoverage`。CLI 示例：
 
-Workspace Agent 不向用户回显 Proposal JSON。字符串数组以新增、删除和顺序变化展示；结构化集合按稳定 ID 展示变化；`architecture.modules` 按 Module ID 列出职责、状态所有权、依赖和接口的差异。未变化实体省略，完整结果由 Harness 写入现有正式文档。
+Workspace Agent 不向用户回显 Proposal JSON。字符串数组以新增、删除和顺序变化展示；结构化集合按稳定 ID 展示变化；`architecture.roles` 按 Role ID 展示职责差异。未变化实体省略，完整结果由 Harness 写入现有正式文档。
 
 ```powershell
 $proposal = @'
-{"patch":{"architecture":{"stage2Order":["frontend","core"]}},"rationale":"补齐确定性模块顺序","evidenceSources":[{"id":"EV_USER","kind":"user_directive","locator":"STAGE2_ORDER_INCOMPLETE","claim":"用户确认 frontend 位于 core 之前，并要求写入项目事实。","locations":[]}],"evidenceCoverage":{"architecture.stage2Order":["EV_USER"]}}
+{"patch":{"intent":{"exclusions":["虚拟内存"]}},"rationale":"删除已经纳入 baseline 的旧 Cache 排除项。","evidenceSources":[{"id":"EV_USER","kind":"user_directive","locator":"INTENT_EXCLUSION_STALE","claim":"用户确认 baseline 包含 Cache，并要求排除项只保留虚拟内存。","locations":[]}],"evidenceCoverage":{"intent.exclusions":["EV_USER"]}}
 '@
-node dist\src\cli.js stage1 correct E:\107\my_core STAGE2_ORDER_INCOMPLETE --proposal-json $proposal
+node dist\src\cli.js stage1 correct E:\107\my_core INTENT_EXCLUSION_STALE --proposal-json $proposal
 ```
 
 同一根因的多个 finding code 可以依次放在项目路径之后，且必须包含当前第一个 open finding。Audit 报告只属于 `findingSource`，不能充当新值 Evidence。Decision、项目文档、Research 和 Profile Evidence 必须携带当前 revision、digest 或 fingerprint，`user_directive` 必须是可独立理解的完整规则。
@@ -226,7 +226,7 @@ node dist\src\cli.js stage1 correction-migrate E:\107\my_core --apply
 迁移不会伪造旧记录缺失的 Evidence，这些记录标记为 `legacy_unresolved`。既有 approval 保持有效。Profile refresh 默认保留项目覆盖字段。用户确认某个字段重新由 Profile 管理时显式释放：
 
 ```powershell
-node dist\src\cli.js stage1 release-override E:\107\my_core architecture.stage2Order
+node dist\src\cli.js stage1 release-override E:\107\my_core intent.exclusions
 ```
 
 审查通过后，由用户确认当前文档并批准：
@@ -235,7 +235,7 @@ node dist\src\cli.js stage1 release-override E:\107\my_core architecture.stage2O
 node dist\src\cli.js stage1 approve E:\107\my_core
 ```
 
-批准会绑定 Architecture、Module Manifest、Research Memo 和 Verification Plan 的聚合哈希。批准后的文档发生变化时，对外状态显示为 `NEEDS_REVISION`，项目骨架和后续阶段门禁停止推进。
+批准会绑定 Architecture、Research Memo 和 Verification Plan 的聚合哈希。批准后的文档发生变化时，对外状态显示为 `NEEDS_REVISION`，项目骨架和后续阶段门禁停止推进。
 
 生成 Chisel 骨架并执行 smoke check：
 
@@ -244,11 +244,11 @@ node dist\src\cli.js stage1 scaffold E:\107\my_core
 node dist\src\cli.js stage1 complete E:\107\my_core
 ```
 
-`STAGE1_COMPLETE` 表示全局架构、模块边界、验证策略和构建骨架已经闭合。Baseline RTL 在 Stage2 实现。
+`STAGE1_COMPLETE` 表示全局架构、Architecture Role、验证策略和构建骨架已经闭合。Implementation Unit 和 Chisel Module 边界在 Stage2 确定，Baseline RTL 也在 Stage2 实现。
 
 ## 8. Stage2 引导式实现
 
-Stage2 只接受 `STAGE1_COMPLETE` 且 Architecture 批准哈希未漂移的项目。初始化后先进入 Implementation Topology Decision Loop，Harness 生成唯一 `design/plan.md`，Agent A 担任 Planner，Agent B 保持 idle。`architecture.stage2Order` 只作讨论线索，不驱动 Unit 实施。权威设计见 [PRODUCT_PLAN/STAGE2.md](./PRODUCT_PLAN/STAGE2.md)。
+Stage2 只接受 `STAGE1_COMPLETE` 且 Architecture 批准哈希未漂移的项目。初始化后先进入 Implementation Topology Decision Loop，Harness 生成唯一 `design/plan.md`，Agent A 担任 Planner，Agent B 保持 idle。Implementation Topology 只由 Stage2 状态拥有。权威设计见 [PRODUCT_PLAN/STAGE2.md](./PRODUCT_PLAN/STAGE2.md)。
 
 ```powershell
 node dist\src\cli.js stage2 init E:\107\my_core
@@ -274,7 +274,7 @@ node dist\src\cli.js stage2 custom E:\107\my_core S2_TOP_001 --text "完整自�
 node dist\src\cli.js stage2 topology-reopen E:\107\my_core S2_TOP_001 --reason "Unit 边界需要修正"
 ```
 
-全部 Decision 闭合后，Harness 检查 Architecture Module 唯一映射、Interface owner、路径 owner、Unit DAG、wave 和完成条件。用户审阅完整看板后明确批准 Plan：
+全部 Decision 闭合后，Harness 检查 Architecture Role 唯一映射、Interface owner、路径 owner、Unit DAG、wave 和完成条件。用户审阅完整看板后明确批准 Plan：
 
 ```powershell
 node dist\src\cli.js stage2 review E:\107\my_core
@@ -364,6 +364,15 @@ node dist\src\cli.js stage1 probe E:\107\my_core
 
 ## 10. Profile 更新
 
+Stage1 schemaVersion 1 或 Stage2 schemaVersion 2 的旧项目必须先执行顶层产品迁移。先只读预检，确认保留的 Decision、Correction、历史重放哈希、退役文件和 Stage2 失效范围，再显式应用：
+
+```powershell
+node dist\src\cli.js migrate E:\107\my_core --profile dual_issue_demo --dry-run --json
+node dist\src\cli.js migrate E:\107\my_core --profile dual_issue_demo --apply --json
+```
+
+迁移将 Intent 纳入 ProjectSpec，删除 Stage1 Module Manifest 和 `stage2Order`，把 Global Protocol 改为 Architecture Role 关系，并从 Role 重新建立 Stage2 Topology。迁移不会替用户重新批准 Architecture。完成后必须运行 `stage1 review`、独立 `stage1 audit` 和用户 `stage1 approve`；存在活动 Architecture Rework 时，再执行 `stage2 rework-resume`。
+
 未批准项目可以更新到同 ID 的新 Profile：
 
 ```powershell
@@ -412,4 +421,4 @@ node dist\src\cli.js stage1 status E:\107\dual_issue_demo
 node dist\src\cli.js stage1 next E:\107\dual_issue_demo
 ```
 
-当前 Profile 为 `0.7.0`，项目已达到 `STAGE1_COMPLETE` 并初始化 schemaVersion 2 Stage2。当前状态为 `TOPOLOGY_DECISION_LOOP`，`S2_TOP_001` 已形成三个 Implementation Unit 边界候选并等待用户确认，尚无已确认 Unit、Unit Design 或 RTL。该项目用于先生成一个保守的顺序双发射 baseline，再从同一冻结 commit 分别运行 Processor Agent 工作流和 Direct Codex 优化实验。
+当前 Profile 为 `0.8.0`。产品迁移已将 Stage1 升级到 schemaVersion 2、ProjectSpec history 升级到 protocolVersion 3、Stage2 升级到 schemaVersion 3，并删除旧 `architecture/modules.yaml`。Stage1 当前为 revision 144 `REVIEW_CORRECTION`，独立 Audit 要求在 `verification.requiredScenarios` 补齐 reset 释放及 drain 完成后从 `0x80000000` 重新取指的验收场景。Stage2 revision 8 保持 `S2_ARW_001` 活动并处于 `BLOCKED`，待新的 Stage1 用户批准后恢复。当前没有已确认 Unit、Unit Design 或 RTL。

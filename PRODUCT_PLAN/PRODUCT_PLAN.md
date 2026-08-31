@@ -112,7 +112,7 @@ Research -> Design -> Implementation -> Verification -> Optimization
 1. 可以独立构建和测试的 Chisel 项目。
 2. 来源可追踪的 Research Memo 与采用结论。
 3. 用户确认的 Architecture Overview、Contract 和 ADR。
-4. Module Manifest、用户批准的 Implementation Plan 及 Architecture 到源码之间的 Design 文档。
+4. Architecture Role、用户批准的 Implementation Plan 及 Architecture 到源码之间的 Design 文档。
 5. baseline Core、定向测试和性能计数器。
 6. 一个完整执行的 Architecture Change。
 7. 一次最小 Optimization Loop。
@@ -176,11 +176,11 @@ Harness Core 只依赖 `AgentRuntime` 接口。Codex 命令、认证、版本和
 
 保存可重建的机器索引：
 
-1. 稳定 Module ID、模块、接口、信号和源码路径。
+1. 稳定 Architecture Role、Implementation Unit、接口、信号和源码路径。
 2. 流水级与主要数据流。
 3. 构建、测试和 elaboration 命令。
 4. Architecture、Design、源码和验证的引用关系。
-5. `architecture/modules.yaml` 中的模块依赖与实施状态。
+5. Stage2 Implementation Plan 中的 Role 映射、Unit DAG 与实施状态。
 
 Project Model 不复制源码正文，不取代用户确认的 Architecture。
 
@@ -359,7 +359,7 @@ gates
 
 | 阶段 | 目标 | 完成结果 | 权威计划 |
 |---|---|---|---|
-| Stage1 | 闭合全局架构并建立项目 | 已批准的 Project Blueprint、项目骨架和 Architecture Module Manifest | [STAGE1.md](./STAGE1.md) |
+| Stage1 | 闭合全局架构并建立项目 | 已批准的 Project Blueprint、Architecture Role、项目骨架和 Verification Plan | [STAGE1.md](./STAGE1.md) |
 | Stage2 | 逐项闭合 Implementation Topology，再逐 Unit 完成设计、实现、验证与集成 | 已批准 Implementation Plan，以及可构建、可测试并冻结的 baseline 或已完成的 Change | [STAGE2.md](./STAGE2.md) |
 | Stage3 | 用可复现实验证明或否定优化假设 | 带 A/B 证据的接受或拒绝结论 | [STAGE3.md](./STAGE3.md) |
 
@@ -381,8 +381,11 @@ Project Generator 初次执行只生成恢复工作所需的最小结构：
 user_project/
 ├── AGENTS.md
 ├── architecture/
-│   ├── overview.md
-│   └── modules.yaml
+│   └── overview.md
+├── research/
+│   └── stage1.md
+├── verification/
+│   └── plan.md
 └── .assistant/
     ├── project.yaml
     └── project-spec-history-<hash>.json.gz
@@ -390,8 +393,8 @@ user_project/
 
 其余实体按首次正式内容延迟创建：
 
-1. 首次调研创建 `research/`。
-2. 首次 Stage2 Topology Decision 创建 `design/plan.md`；首次 Unit Design 创建 `design/<unit-id>.md`。Stage1 已批准的 `architecture/modules.yaml` 在 Stage2 保持只读。
+1. Stage1 创建并持续更新 `research/stage1.md`，只投影正式 Decision Evidence 和结论。
+2. 首次 Stage2 Topology Decision 创建 `design/plan.md`；首次 Unit Design 创建 `design/<unit-id>.md`。Stage2 从已批准的 Architecture Role 和全局语义建立拓扑。
 3. 首次架构变更创建 `architecture/contracts/` 与 `architecture/decisions/`。
 4. 首次实现创建 `src/`，首次形成正式验证证据时创建 `verification/`。
 5. 首次优化创建 `experiments/`，其下分类目录也按内容创建。
@@ -416,12 +419,14 @@ processor_agent/
 ├── skills/               通用领域方法
 ├── package.json
 ├── tsconfig.json
-├── src/                  TypeScript 执行内核与 CLI，初期保持扁平
+├── src/                  TypeScript 执行内核与 CLI
+│   ├── stage1/           ProjectSpec、事实来源与 Stage1 领域逻辑
+│   └── stage2/           Topology、展示、Worker Contract 与 Proposal 校验
 ├── profiles/             项目生成 Profile
 └── tests/                状态机、生成器和最小端到端测试
 ```
 
-npm 与 `package-lock.json` 已在 M0 冻结。`src/` 初期只承载入口、Harness、Codex CLI Runtime 和 WSL Runner 等实际代码。实现规模允许时合并文件。`dual_issue_demo` 的专属事实进入 `profiles/dual_issue_demo/profile.yaml`，通用逻辑不得依赖该路径中的具体字段。
+npm 与 `package-lock.json` 已在 M0 冻结。`src/stage1/` 和 `src/stage2/` 只拆分具有独立领域职责的逻辑；状态机编排仍保留在阶段入口，避免为单个函数增加目录。`product-migration.ts` 独立承载跨 Stage1、Stage2 的版本迁移。`dual_issue_demo` 的专属事实进入 `profiles/dual_issue_demo/profile.yaml`，通用逻辑不得依赖该路径中的具体字段。
 
 新实体需要满足至少一项条件：
 
@@ -530,7 +535,7 @@ Product 与 Direct Codex 从同一个冻结 commit 开始。Product 使用完整
 1. Project Blueprint 与项目生成。
 2. Project Model。
 3. Project 和 Change 状态机。
-4. Module Manifest、Stage2 Topology Decision Loop 与 Unit 开发循环。
+4. Architecture Role、Stage2 Topology Decision Loop 与 Unit 开发循环。
 5. Skill Registry 与固定 Architecture Change Profile。
 6. `CodexCliRuntime` Agent Runtime Adapter。
 7. Workspace Agent、Topology Planner、可轮转的 Shadow Align 与 Active Coding，以及按 Unit 可选的两个验证 Worker。
@@ -591,7 +596,7 @@ Product 与 Direct Codex 从同一个冻结 commit 开始。Product 使用完整
 
 1. 实现 `dual_issue_demo` Profile。
 2. 引导用户闭合最小 Architecture 与 Design。
-3. 建立 Research Memo 和 Module Manifest。
+3. 建立 Research Memo、Architecture Role 和 Verification Plan。
 4. 通过逐项用户讨论确认 Implementation Unit、Interface owner、源码拓扑、DAG 和实施 wave。
 5. 批准 `design/plan.md` 并展示完整 Stage2 实施看板。
 6. 以首个 ready Unit 完成第一条 `Design -> Implementation -> Verification` tracer。
@@ -637,7 +642,7 @@ Product 与 Direct Codex 从同一个冻结 commit 开始。Product 使用完整
 13. 清空全部 Agent 上下文后，新 Agent 可以从项目文件恢复当前 Change。
 14. 每项已实现行为都能追踪到 Design、Contract 或 baseline Architecture。
 15. 每项用户决策都能在 Contract、ADR 或 Design 中定位。
-16. 每个 Architecture Module 都能通过已批准 Implementation Plan 追踪到 primary Unit、Design、源码和验证。
+16. 每个 Architecture Role 都能通过已批准 Implementation Plan 追踪到唯一 Implementation Unit、Design、源码和验证。
 17. Stage3 结果包含 baseline、优化假设、对应 Change、A/B 证据和接受结论。
 18. 未安装 ChatGPT 客户端时，产品仍能完成第一版完整流程。
 19. 每个 Unit 都保存用户明确选择的 `verificationMode`，且不继承上一 Unit 选择。

@@ -4,6 +4,7 @@ import { parse } from "yaml";
 import { pathExists, readText, sha256 } from "./io.js";
 import type {
   CommandSpec,
+  ArchitectureRoleSpec,
   CounterRuleSpec,
   DecisionAcceptanceSpec,
   DecisionOption,
@@ -53,8 +54,10 @@ async function findPackageRoot(start: string): Promise<string> {
 
 export function validateProfile(value: unknown): ProjectProfile {
   const root = object(value, "profile");
+  const schemaVersion = number(root.schemaVersion, "schemaVersion");
+  const architecture = validateArchitecture(root.architecture, schemaVersion);
   const profile: ProjectProfile = {
-    schemaVersion: number(root.schemaVersion, "schemaVersion"),
+    schemaVersion,
     id: string(root.id, "id"),
     version: string(root.version, "version"),
     displayName: string(root.displayName, "displayName"),
@@ -66,9 +69,12 @@ export function validateProfile(value: unknown): ProjectProfile {
     decisions: array(root.decisions, "decisions").map((item, index) =>
       validateDecision(item, `decisions[${index}]`),
     ),
-    architecture: validateArchitecture(root.architecture),
-    verification: validateVerification(root.verification),
+    architecture,
+    verification: validateVerification(root.verification, schemaVersion),
     scaffold: validateScaffold(root.scaffold),
+    ...(schemaVersion >= 2
+      ? {}
+      : { legacyArchitecture: validateLegacyArchitecture(root.architecture) }),
   };
   validateReferences(profile);
   return profile;
@@ -124,9 +130,16 @@ function validateOption(value: unknown, label: string): DecisionOption {
   };
 }
 
-function validateArchitecture(value: unknown): ProjectProfile["architecture"] {
+function validateArchitecture(
+  value: unknown,
+  schemaVersion: number,
+): ProjectProfile["architecture"] {
   const item = object(value, "architecture");
+  if (schemaVersion >= 2 && (item.modules !== undefined || item.stage2Order !== undefined)) {
+    throw new Error("Profile schemaVersion 2 removes architecture.modules and architecture.stage2Order");
+  }
   return {
+    roles: validateArchitectureRoles(item, schemaVersion),
     systemBoundary: optionalStringArray(item.systemBoundary, "architecture.systemBoundary"),
     supportedInstructions: optionalStringArray(
       item.supportedInstructions,
@@ -142,6 +155,31 @@ function validateArchitecture(value: unknown): ProjectProfile["architecture"] {
     counterRules: optionalArray(item.counterRules, "architecture.counterRules").map((rule, index) =>
       validateCounterRule(rule, `architecture.counterRules[${index}]`),
     ),
+  };
+}
+
+function validateArchitectureRoles(
+  item: Record<string, unknown>,
+  schemaVersion: number,
+): ArchitectureRoleSpec[] {
+  const source = schemaVersion >= 2 ? item.roles : item.modules;
+  return array(source, "architecture.roles").map((value, index) => {
+    const role = object(value, `architecture.roles[${index}]`);
+    return {
+      id: string(role.id, `architecture.roles[${index}].id`),
+      responsibility: string(
+        role.responsibility,
+        `architecture.roles[${index}].responsibility`,
+      ),
+    };
+  });
+}
+
+function validateLegacyArchitecture(
+  value: unknown,
+): NonNullable<ProjectProfile["legacyArchitecture"]> {
+  const item = object(value, "architecture");
+  return {
     modules: array(item.modules, "architecture.modules").map((module, index) =>
       validateModule(module, `architecture.modules[${index}]`),
     ),
@@ -163,9 +201,17 @@ function validateSharedField(value: unknown, label: string): SharedFieldSpec {
 
 function validateGlobalProtocol(value: unknown, label: string): GlobalProtocolSpec {
   const item = object(value, label);
+  const ownerRole = item.ownerRole === undefined
+    ? string(item.owner, `${label}.owner`)
+    : string(item.ownerRole, `${label}.ownerRole`);
   return {
     id: string(item.id, `${label}.id`),
-    owner: string(item.owner, `${label}.owner`),
+    ownerRole,
+    producerRoles: item.producerRoles === undefined
+      ? [ownerRole]
+      : stringArray(item.producerRoles, `${label}.producerRoles`),
+    consumerRoles: optionalStringArray(item.consumerRoles, `${label}.consumerRoles`),
+    affectedResources: optionalStringArray(item.affectedResources, `${label}.affectedResources`),
     rules: stringArray(item.rules, `${label}.rules`),
   };
 }
@@ -190,7 +236,10 @@ function validateModule(value: unknown, label: string): ModuleSpec {
   };
 }
 
-function validateVerification(value: unknown): ProjectProfile["verification"] {
+function validateVerification(
+  value: unknown,
+  schemaVersion: number,
+): ProjectProfile["verification"] {
   const item = object(value, "verification");
   return {
     referenceModel: string(item.referenceModel, "verification.referenceModel"),
@@ -203,7 +252,24 @@ function validateVerification(value: unknown): ProjectProfile["verification"] {
     ).map((entry, index) =>
       validateDecisionAcceptance(entry, `verification.decisionAcceptance[${index}]`),
     ),
+    completionCriteria: schemaVersion >= 2
+      ? stringArray(item.completionCriteria, "verification.completionCriteria")
+      : legacyCompletionCriteria(item),
   };
+}
+
+function legacyCompletionCriteria(item: Record<string, unknown>): string[] {
+  const layers = stringArray(item.layers, "verification.layers");
+  const explicit = layers.filter((entry) => /^(?:门禁\d|A_[A-Z0-9_]+_GATE)/u.test(entry));
+  if (explicit.length > 0) {
+    return explicit;
+  }
+  return [
+    "每个 baseline Implementation Unit 都通过对应定向测试。",
+    "架构轨迹与选定参考策略一致。",
+    "必需计数器均可观测并遵守已批准的计数规则。",
+    "集成测试覆盖已批准的 stall、redirect、trap 和双发射行为。",
+  ];
 }
 
 function validateDecisionAcceptance(value: unknown, label: string): DecisionAcceptanceSpec {
@@ -287,32 +353,26 @@ function validateReferences(profile: ProjectProfile): void {
     profile.decisions.map((decision) => ({ id: decision.id, dependencies: decision.dependsOn })),
     "decision",
   );
-  const moduleIds = new Set(profile.architecture.modules.map((module) => module.id));
-  for (const module of profile.architecture.modules) {
-    for (const dependency of module.dependsOn) {
-      if (!moduleIds.has(dependency)) {
-        throw new Error(`Module ${module.id} depends on unknown module ${dependency}`);
-      }
+  const architectureRoleIds = new Set<string>();
+  for (const role of profile.architecture.roles) {
+    if (architectureRoleIds.has(role.id)) {
+      throw new Error(`Duplicate Architecture Role id ${role.id}`);
     }
+    architectureRoleIds.add(role.id);
   }
-  const stage2Ids = new Set<string>();
-  for (const moduleId of profile.architecture.stage2Order) {
-    if (!moduleIds.has(moduleId)) {
-      throw new Error(`Stage2 order references unknown module ${moduleId}`);
-    }
-    if (stage2Ids.has(moduleId)) {
-      throw new Error(`Stage2 order repeats module ${moduleId}`);
-    }
-    stage2Ids.add(moduleId);
-  }
-  for (const moduleId of moduleIds) {
-    if (!stage2Ids.has(moduleId)) {
-      throw new Error(`Stage2 order omits module ${moduleId}`);
-    }
-  }
+  const protocolIds = new Set<string>();
   for (const protocol of profile.architecture.globalProtocols) {
-    if (!moduleIds.has(protocol.owner)) {
-      throw new Error(`Protocol ${protocol.id} has unknown owner ${protocol.owner}`);
+    if (protocolIds.has(protocol.id)) {
+      throw new Error(`Duplicate Global Protocol id ${protocol.id}`);
+    }
+    protocolIds.add(protocol.id);
+    if (protocol.ownerRole.trim() === "") {
+      throw new Error(`Protocol ${protocol.id} requires an ownerRole`);
+    }
+    for (const role of [protocol.ownerRole, ...protocol.producerRoles, ...protocol.consumerRoles]) {
+      if (!architectureRoleIds.has(role)) {
+        throw new Error(`Protocol ${protocol.id} references unknown Architecture Role ${role}`);
+      }
     }
   }
   const acceptanceIds = new Set<string>();

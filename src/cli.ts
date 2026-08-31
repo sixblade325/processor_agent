@@ -8,6 +8,7 @@ import {
   researchDecision,
 } from "./agent-runtime.js";
 import { renderDecisionPacket } from "./render.js";
+import { migrateProductSchema } from "./product-migration.js";
 import {
   answerCustomDecision,
   answerDecision,
@@ -67,6 +68,10 @@ async function main(): Promise<void> {
   }
   if (scope === "open") {
     await commandOpen(parseArguments(input.slice(1)));
+    return;
+  }
+  if (scope === "migrate") {
+    await commandProductMigrate(parseArguments(input.slice(1)));
     return;
   }
   const command = input[1];
@@ -142,6 +147,38 @@ async function main(): Promise<void> {
     default:
       throw new Error(`Unknown Stage1 command: ${command}`);
   }
+}
+
+async function commandProductMigrate(args: ParsedArguments): Promise<void> {
+  assertOnlyOptions(args, ["profile", "dry-run", "apply", "json"]);
+  const dryRun = flag(args, "dry-run");
+  const apply = flag(args, "apply");
+  if (dryRun === apply) {
+    throw new Error("Product migration requires exactly one of --dry-run or --apply");
+  }
+  const report = await migrateProductSchema(
+    requirePositional(args, 0, "project path"),
+    {
+      profileReference: requireOption(args, "profile"),
+      apply,
+    },
+  );
+  if (flag(args, "json")) {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(
+    [
+      `Product migration: ${report.fromProfileVersion} -> ${report.toProfileVersion}`,
+      `Stage1: schema ${String(report.fromStage1SchemaVersion)} -> 2, revision ${String(report.sourceStage1Revision)} -> ${String(report.targetStage1Revision)}`,
+      `Stage2: ${report.stage2.sourceSchemaVersion === undefined ? "not initialized" : `schema ${String(report.stage2.sourceSchemaVersion)} -> ${String(report.stage2.targetSchemaVersion)}`}`,
+      `Retired artifacts: ${report.retiredArtifacts.join(", ") || "none"}`,
+      `Ineffective corrections: ${report.ineffectiveCorrectionIds.join(", ") || "none"}`,
+      `Applied: ${String(report.applied)}`,
+      report.nextRequiredAction,
+      "",
+    ].join("\n"),
+  );
 }
 
 async function commandStage2(command: string, args: ParsedArguments): Promise<void> {
@@ -604,7 +641,7 @@ function printStage2Summary(summary: Awaited<ReturnType<typeof summarizeStage2>>
             "Unit | Architecture | DependsOn | Wave | Status | Agent | Design | Source | Test | Verification | Blocker",
             ...summary.board.map((row) => [
               row.unitId,
-              row.architectureModules.join(",") || "-",
+              row.architectureRoles.join(",") || "-",
               row.dependsOn.join(",") || "-",
               row.wave === null ? "-" : String(row.wave),
               row.status,
@@ -799,6 +836,7 @@ function assertOnlyOptions(args: ParsedArguments, allowed: string[]): void {
 function printHelp(): void {
   process.stdout.write(`processor-agent commands:
   open <path> [--print-prompt]
+  migrate <path> --profile id --dry-run|--apply [--json]
 
 processor-agent stage1 commands:
   init <path> [--profile id] [--name name] [--goal text] [--use-case text]

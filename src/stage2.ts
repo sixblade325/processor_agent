@@ -20,11 +20,41 @@ import {
   snapshotVerificationInputs,
   type Stage2AgentExecutor,
 } from "./stage2-runtime.js";
+import { effectiveProjectSpec, isProjectSpecTarget } from "./stage1/project-spec.js";
+import {
+  renderDesignDocument,
+  renderImplementationPlanDocument,
+  renderVerificationDocument,
+} from "./stage2/presentation.js";
+import {
+  buildImplementationPrompt,
+  buildIndependentVerificationPrompt,
+  buildReviewPrompt,
+  buildShadowPrompt,
+  buildTopologyPlannerPrompt,
+  buildTopologyResearchPrompt,
+  designSchema,
+  implementationSchema,
+  reviewSchema,
+  topologyProposalSchema,
+  topologyResearchSchema,
+} from "./stage2/worker-contracts.js";
+import {
+  buildUnitArchitectureContext,
+  validateArchitectureRoleMapping,
+} from "./stage2/topology-model.js";
+import {
+  objectValue,
+  requireStringArray,
+  requireText,
+  validateDesignProposal,
+  validateImplementationProposal,
+  validateReviewReport,
+} from "./stage2/proposal-validation.js";
 import {
   assertApprovalCurrent,
   beginStage1ArchitectureRework,
   closeStage1ArchitectureRework,
-  isProjectSpecTarget,
   loadStage1,
   saveProjectState,
   type LoadedProject,
@@ -32,7 +62,6 @@ import {
 import type {
   CommandResult,
   CommandSpec,
-  ModuleSpec,
   ReviewCorrectionEvidenceSource,
   Stage1ProjectState,
   Stage2AgentAssignment,
@@ -77,6 +106,15 @@ export interface Stage2ExecutionOptions {
   refreshResearch?: boolean;
 }
 
+export interface Stage2ProductMigrationResult {
+  migrated: boolean;
+  sourceSchemaVersion?: number;
+  targetSchemaVersion?: number;
+  sourceRevision?: number;
+  targetRevision?: number;
+  invalidatedDrafts: string[];
+}
+
 export interface Stage2AgentRunResult<T> {
   loaded: LoadedStage2Project;
   output: T;
@@ -113,7 +151,7 @@ const TOPOLOGY_DECISIONS: Stage2TopologyDecisionSpec[] = [
     id: "S2_TOP_001",
     kind: "unit_mapping",
     topic: "Implementation Unit 边界",
-    question: "Architecture Module 应如何映射为 Implementation Unit，哪些需要合并或拆分？",
+    question: "Architecture Role 应如何映射为 Implementation Unit，哪些职责需要合并或拆分？",
     whyNow: "Unit 边界决定后续所有 owner、路径和实施依赖。",
     blocking: true,
     researchPolicy: "required",
@@ -183,7 +221,7 @@ export async function initStage2(projectPath: string): Promise<LoadedStage2Proje
   const timestamp = new Date().toISOString();
   const topology = createTopologyState();
   const stage2: Stage2ProjectStage = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     status: "TOPOLOGY_DISCOVERY",
     revision: 0,
     stateEpoch: 1,
@@ -214,10 +252,14 @@ export async function loadStage2(projectPath: string): Promise<LoadedStage2Proje
   if (loaded.state.stage2 === undefined) {
     throw new Error(`Stage2 is not initialized at ${loaded.root}`);
   }
-  if (loaded.state.stage2.schemaVersion === 1) {
+  const schemaVersion = (loaded.state.stage2 as { schemaVersion: number }).schemaVersion;
+  if (schemaVersion === 1) {
     throw new Error("Legacy Stage2 state requires explicit `processor-agent stage2 migrate <path>`");
   }
-  validateStage2State(loaded.state.stage2);
+  if (schemaVersion === 2) {
+    throw new Error("Stage2 schemaVersion 2 requires explicit product migration");
+  }
+  validateStage2State(loaded.state.stage2 as Stage2ProjectStage);
   return refineLoaded(loaded);
 }
 
@@ -283,7 +325,7 @@ export async function migrateLegacyStage2(
     draftIndexes,
   };
   const stage2: Stage2ProjectStage = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     status: "TOPOLOGY_DISCOVERY",
     revision: legacy.revision,
     stateEpoch: legacy.stateEpoch + 1,
@@ -304,6 +346,161 @@ export async function migrateLegacyStage2(
   await atomicWriteText(resolveWithin(loaded.root, topology.planPath), content);
   await saveProjectState(loaded.root, loaded.state);
   return refineLoaded(loaded);
+}
+
+export async function migrateStage2ProductSchema(
+  root: string,
+  state: Stage1ProjectState,
+  migratedAt: string,
+  apply: boolean,
+): Promise<Stage2ProductMigrationResult> {
+  const raw = state.stage2 as unknown as {
+    schemaVersion: number;
+    status: Stage2ProjectStage["status"];
+    revision: number;
+    stateEpoch: number;
+    initializedAt: string;
+    topology?: Stage2TopologyState;
+    modules?: Record<string, Stage2ModuleState>;
+    architectureRework?: Stage2ArchitectureReworkRecord;
+    architectureReworkHistory?: Stage2ArchitectureReworkRecord[];
+    blockers?: string[];
+    history?: Stage2ProjectStage["history"];
+  } | undefined;
+  if (raw === undefined) {
+    return { migrated: false, invalidatedDrafts: [] };
+  }
+  if (raw.schemaVersion === 3) {
+    return {
+      migrated: false,
+      sourceSchemaVersion: 3,
+      targetSchemaVersion: 3,
+      sourceRevision: raw.revision,
+      targetRevision: raw.revision,
+      invalidatedDrafts: [],
+    };
+  }
+  if (raw.schemaVersion !== 2) {
+    throw new Error(
+      `Product migration requires Stage2 schemaVersion 2 or 3, current ${String(raw.schemaVersion)}`,
+    );
+  }
+  const modules = Object.values(raw.modules ?? {});
+  const unsafe = modules.filter((module) =>
+    module.design?.approval !== undefined
+    || module.implementation !== undefined
+    || module.verification !== undefined
+  );
+  if (unsafe.length > 0) {
+    throw new Error(
+      `Product migration requires manual closure for approved or implemented Units: ${unsafe.map((module) => module.id).join(", ")}`,
+    );
+  }
+  const draftIndexes = modules.flatMap((module) => {
+    const design = module.design;
+    return design === undefined
+      ? []
+      : [{
+          moduleId: module.id,
+          designPath: design.path,
+          designSha256: design.documentSha256,
+          runId: design.runId,
+          threadId: design.threadId,
+        }];
+  });
+  for (const draft of draftIndexes) {
+    const absolute = resolveWithin(root, draft.designPath);
+    if (!(await pathExists(absolute))) {
+      continue;
+    }
+    const current = await readText(absolute);
+    if (sha256(current) !== draft.designSha256) {
+      throw new Error(`Stage2 migration found Design drift: ${draft.designPath}`);
+    }
+    if (apply) {
+      await atomicWriteText(
+        absolute,
+        [
+          "> 迁移状态：本草案依赖已退役的 Stage1 Module Manifest，已失效，仅作迁移来源参考。",
+          "",
+          current.trimEnd(),
+          "",
+        ].join("\n"),
+      );
+    }
+  }
+
+  const sourceRevision = raw.revision;
+  const targetRevision = sourceRevision + 1;
+  const topology = createTopologyState();
+  topology.migration = {
+    migratedAt,
+    sourceRevision,
+    sourceStateEpoch: raw.stateEpoch,
+    draftIndexes,
+  };
+  const architectureRework = raw.architectureRework === undefined
+    ? undefined
+    : structuredClone(raw.architectureRework);
+  if (architectureRework !== undefined) {
+    architectureRework.baseline.stage2Revision += 1;
+    architectureRework.baseline.planRevision = 0;
+    architectureRework.baseline.unitPlanHashes = {};
+    delete architectureRework.baseline.planApprovalSha256;
+    architectureRework.updatedAt = migratedAt;
+  }
+  const stage2: Stage2ProjectStage = {
+    schemaVersion: 3,
+    status: architectureRework === undefined ? "TOPOLOGY_DISCOVERY" : "BLOCKED",
+    revision: targetRevision,
+    stateEpoch: raw.stateEpoch + 1,
+    initializedAt: raw.initializedAt,
+    updatedAt: migratedAt,
+    topology,
+    moduleOrder: [],
+    modules: {},
+    agents: { A: idleAssignment("A"), B: idleAssignment("B") },
+    ...(architectureRework === undefined ? {} : { architectureRework }),
+    ...(raw.architectureReworkHistory === undefined
+      ? {}
+      : { architectureReworkHistory: structuredClone(raw.architectureReworkHistory) }),
+    blockers: architectureRework === undefined
+      ? []
+      : [
+          `Architecture Rework ${architectureRework.id} remains active after product migration: ${architectureRework.repair.kind}:${architectureRework.repair.target}`,
+        ],
+    history: [
+      ...(raw.history ?? []),
+      {
+        at: migratedAt,
+        revision: targetRevision,
+        stateEpoch: raw.stateEpoch + 1,
+        event: "PRODUCT_SCHEMA_MIGRATED",
+        detail: "Stage2 schemaVersion 2 -> 3; topology rebuilt from Architecture Roles",
+      },
+    ],
+  };
+  if (architectureRework === undefined) {
+    assignPlanner(stage2.agents.A, topology.decisionOrder[0]);
+  }
+  state.stage2 = stage2;
+  const content = renderImplementationPlanDocument(
+    state,
+    stage2,
+    architectureRework === undefined ? "待决策" : "需修订",
+  );
+  topology.planDocumentSha256 = sha256(content);
+  if (apply) {
+    await atomicWriteText(resolveWithin(root, topology.planPath), content);
+  }
+  return {
+    migrated: true,
+    sourceSchemaVersion: 2,
+    targetSchemaVersion: 3,
+    sourceRevision,
+    targetRevision,
+    invalidatedDrafts: draftIndexes.map((draft) => draft.designPath),
+  };
 }
 
 export function getReadyStage2Actions(state: Stage1ProjectState): Stage2NextAction[] {
@@ -419,8 +616,8 @@ export async function summarizeStage2(loaded: LoadedStage2Project): Promise<Stag
       .filter((module) => !plannedIds.has(module.id))
       .map((module): Stage2ImplementationUnitPlan => ({
         id: module.id,
-        kind: "architecture",
-        architectureModules: [],
+        kind: "implementation",
+        architectureRoles: [],
         responsibility: module.architecture.responsibility,
         rationale: "Architecture Rework 前的 Unit，等待 Topology 重新闭合。",
         packageName: "",
@@ -450,7 +647,7 @@ export async function summarizeStage2(loaded: LoadedStage2Project): Promise<Stag
     const status: Stage2Summary["board"][number]["status"] = module?.status ?? "PLANNED";
     return {
       unitId: unit.id,
-      architectureModules: [...unit.architectureModules],
+      architectureRoles: [...unit.architectureRoles],
       dependsOn: [...unit.dependsOn],
       wave: unit.wave,
       status,
@@ -527,14 +724,13 @@ export function buildStage2TaskEnvelope(
     }
     const decision = requireTopologyDecision(loaded.state.stage2, decisionId);
     return {
-      schemaVersion: 2,
+      schemaVersion: 3,
       task,
       project: { name: loaded.state.project.name, root: loaded.root },
       topology: {
         decision: structuredClone(decision.spec),
-        architectureModules: structuredClone(
-          loaded.state.stage1.projectSpec?.architecture.modules
-            ?? loaded.loadedProfile.profile.architecture.modules,
+        architectureRoles: structuredClone(
+          effectiveProjectSpec(loaded.state, loaded.loadedProfile.profile).architecture.roles,
         ),
         confirmedDecisions: loaded.state.stage2.topology.decisionOrder.flatMap((id) => {
           const item = requireTopologyDecision(loaded.state.stage2, id);
@@ -562,7 +758,10 @@ export function buildStage2TaskEnvelope(
       },
       skills: skills.map((skill) => ({ ...skill })),
       allowedPaths: [loaded.state.stage2.topology.planPath],
-      explicitExclusions: loaded.state.stage1.intent.exclusions,
+      explicitExclusions: effectiveProjectSpec(
+        loaded.state,
+        loaded.loadedProfile.profile,
+      ).intent.exclusions,
       nextPermittedAction: nextPermittedAction(task),
     };
   }
@@ -589,7 +788,7 @@ export function buildStage2TaskEnvelope(
       : { designPath: design.path, designSha256: design.documentSha256 }),
   };
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     task,
     project: {
       name: loaded.state.project.name,
@@ -606,7 +805,10 @@ export function buildStage2TaskEnvelope(
     authority,
     skills: skills.map((skill) => ({ ...skill })),
     allowedPaths,
-    explicitExclusions: proposal?.explicitExclusions ?? loaded.state.stage1.intent.exclusions,
+    explicitExclusions: proposal?.explicitExclusions ?? effectiveProjectSpec(
+      loaded.state,
+      loaded.loadedProfile.profile,
+    ).intent.exclusions,
     ...(design?.approval === undefined
       ? {}
       : { verificationMode: design.approval.verificationMode }),
@@ -1175,14 +1377,6 @@ async function validateArchitectureReworkProposal(
   } else if (!isProjectSpecTarget(repairTarget)) {
     throw new Error(`Stage2 Architecture Rework references unsupported ProjectSpec target ${repairTarget}`);
   }
-  if (
-    repairKind === "project_spec"
-    && ["architecture.modules", "architecture.stage2Order"].includes(repairTarget)
-    && !affectedTopologyDecisions.includes("S2_TOP_001")
-  ) {
-    throw new Error(`${repairTarget} rework must invalidate S2_TOP_001`);
-  }
-
   if (typeof proposal.source !== "object" || proposal.source === null) {
     throw new Error("Stage2 Architecture Rework requires a source");
   }
@@ -2379,32 +2573,40 @@ function applyTopologyPatch(
       if (unit.responsibility.trim() === "" || unit.rationale.trim() === "") {
         throw new Error(`Implementation Unit ${unit.id} requires responsibility and rationale`);
       }
-      if (unit.kind === "architecture" && unit.architectureModules.length === 0) {
-        throw new Error(`Architecture Unit ${unit.id} must map at least one Architecture Module`);
+      if (unit.kind === "implementation" && unit.architectureRoles.length === 0) {
+        throw new Error(`Implementation Unit ${unit.id} must map at least one Architecture Role`);
       }
-      if (unit.kind === "shared" && unit.architectureModules.length > 0) {
-        throw new Error(`Shared Unit ${unit.id} cannot claim Architecture Modules`);
+      if (unit.kind === "shared" && unit.architectureRoles.length > 0) {
+        throw new Error(`Shared Unit ${unit.id} cannot claim Architecture Roles`);
       }
-      for (const moduleId of unit.architectureModules) {
-        if (mappedArchitecture.has(moduleId)) {
-          throw new Error(`Architecture Module ${moduleId} has more than one primary Unit`);
+      for (const role of unit.architectureRoles) {
+        if (mappedArchitecture.has(role)) {
+          throw new Error(`Architecture Role ${role} has more than one primary Unit`);
         }
-        mappedArchitecture.add(moduleId);
+        mappedArchitecture.add(role);
       }
     }
     if (patch.units.length === 0) {
       throw new Error("Implementation Plan requires at least one Unit");
     }
-    if (state?.stage1.projectSpec !== undefined) {
-      const known = new Set(state.stage1.projectSpec.architecture.modules.map((module) => module.id));
-      for (const moduleId of mappedArchitecture) {
-        if (!known.has(moduleId)) {
-          throw new Error(`Unknown Architecture Module in Unit mapping: ${moduleId}`);
-        }
-      }
-      const missing = [...known].filter((moduleId) => !mappedArchitecture.has(moduleId));
-      if (missing.length > 0) {
-        throw new Error(`Architecture Modules without a primary Unit: ${missing.join(", ")}`);
+    if (state !== undefined) {
+      const issues = validateArchitectureRoleMapping(requireCurrentProjectSpec(state), patch.units.map(
+        (unit): Stage2ImplementationUnitPlan => ({
+          ...structuredClone(unit),
+          packageName: "",
+          designPath: "",
+          sourcePaths: [],
+          testPaths: [],
+          integrationPaths: [],
+          dependsOn: [],
+          wave: null,
+          integrationConsumers: [],
+          completionCriteria: [],
+          verificationResponsibility: "",
+        }),
+      ));
+      if (issues.length > 0) {
+        throw new Error(issues.join("; "));
       }
     }
     plan.units = patch.units.map((unit) => ({
@@ -2552,21 +2754,8 @@ function validateCompleteTopologyPlan(state: Stage1ProjectState): string[] {
   } catch (error) {
     issues.push(error instanceof Error ? error.message : String(error));
   }
-  const knownArchitecture = new Set(
-    state.stage1.projectSpec?.architecture.modules.map((module) => module.id) ?? [],
-  );
-  const mapped = new Map<string, string>();
+  issues.push(...validateArchitectureRoleMapping(requireCurrentProjectSpec(state), plan.units));
   for (const unit of plan.units) {
-    for (const moduleId of unit.architectureModules) {
-      if (!knownArchitecture.has(moduleId)) {
-        issues.push(`Unit ${unit.id} maps unknown Architecture Module ${moduleId}`);
-      }
-      const existing = mapped.get(moduleId);
-      if (existing !== undefined) {
-        issues.push(`Architecture Module ${moduleId} is mapped to ${existing} and ${unit.id}`);
-      }
-      mapped.set(moduleId, unit.id);
-    }
     if (unit.designPath !== `design/${unit.id}.md`) {
       issues.push(`Unit ${unit.id} Design path is not closed`);
     }
@@ -2591,11 +2780,6 @@ function validateCompleteTopologyPlan(state: Stage1ProjectState): string[] {
       if (unit.sourcePaths.length === 0 || !hasConsumers) {
         issues.push(`Shared Unit ${unit.id} requires a source boundary and at least one consumer`);
       }
-    }
-  }
-  for (const moduleId of knownArchitecture) {
-    if (!mapped.has(moduleId)) {
-      issues.push(`Architecture Module ${moduleId} has no primary Unit`);
     }
   }
   if (plan.units.length > 1 && plan.interfaces.length === 0) {
@@ -2628,9 +2812,7 @@ function validateCompleteTopologyPlan(state: Stage1ProjectState): string[] {
 }
 
 function initializeModuleLoopFromPlan(stage2: Stage2ProjectStage, state: Stage1ProjectState): void {
-  const architectureModules = new Map(
-    (state.stage1.projectSpec?.architecture.modules ?? []).map((module) => [module.id, module]),
-  );
+  const projectSpec = requireCurrentProjectSpec(state);
   const planIndex = new Map(stage2.topology.plan.units.map((unit, index) => [unit.id, index]));
   const ordered = [...stage2.topology.plan.units].sort((left, right) =>
     (left.wave ?? Number.MAX_SAFE_INTEGER) - (right.wave ?? Number.MAX_SAFE_INTEGER)
@@ -2638,27 +2820,11 @@ function initializeModuleLoopFromPlan(stage2: Stage2ProjectStage, state: Stage1P
   );
   stage2.moduleOrder = ordered.map((unit) => unit.id);
   const plannedModules = Object.fromEntries(ordered.map((unit, order) => {
-    const mapped = unit.architectureModules.map((id) => {
-      const module = architectureModules.get(id);
-      if (module === undefined) {
-        throw new Error(`Implementation Unit ${unit.id} maps unknown Architecture Module ${id}`);
-      }
-      return module;
-    });
-    const interfaces = stage2.topology.plan.interfaces
-      .filter((contract) =>
-        contract.ownerUnit === unit.id
-        || contract.producerUnits.includes(unit.id)
-        || contract.consumerUnits.includes(unit.id)
-      )
-      .map((contract) => contract.id);
-    const architecture: ModuleSpec = {
-      id: unit.id,
-      responsibility: unit.responsibility,
-      stateOwnership: [...new Set(mapped.flatMap((module) => module.stateOwnership))],
-      dependsOn: [...unit.dependsOn],
-      interfaces,
-    };
+    const architecture = buildUnitArchitectureContext(
+      projectSpec,
+      stage2.topology.plan,
+      unit,
+    );
     const module: Stage2ModuleState = {
       id: unit.id,
       order,
@@ -2860,7 +3026,7 @@ function assertKnownUnits(
 }
 
 function refineLoaded(loaded: LoadedProject): LoadedStage2Project {
-  if (loaded.state.stage2 === undefined || loaded.state.stage2.schemaVersion !== 2) {
+  if (loaded.state.stage2 === undefined || loaded.state.stage2.schemaVersion !== 3) {
     throw new Error("Stage2 state is missing");
   }
   return loaded as LoadedStage2Project;
@@ -2870,15 +3036,23 @@ function requireStage2(state: Stage1ProjectState): Stage2ProjectStage {
   if (state.stage2 === undefined) {
     throw new Error("Stage2 is not initialized");
   }
-  if (state.stage2.schemaVersion !== 2) {
+  if (state.stage2.schemaVersion !== 3) {
     throw new Error("Legacy Stage2 state requires explicit migration");
   }
   return state.stage2;
 }
 
+function requireCurrentProjectSpec(state: Stage1ProjectState) {
+  const projectSpec = state.stage1.projectSpec;
+  if (projectSpec === undefined || projectSpec.intent === undefined) {
+    throw new Error("Stage2 requires a product schema migration with a current Stage1 ProjectSpec");
+  }
+  return projectSpec;
+}
+
 function validateStage2State(stage2: Stage2ProjectStage): void {
   if (
-    stage2.schemaVersion !== 2
+    stage2.schemaVersion !== 3
     || stage2.topology?.planPath !== "design/plan.md"
     || !Array.isArray(stage2.topology.decisionOrder)
     || !Array.isArray(stage2.moduleOrder)
@@ -3618,10 +3792,10 @@ function validateTopologyPatchShape(
     const item = objectValue(raw, `${expectedKind} patch item ${String(index)}`);
     requireText(item.id, `${expectedKind} patch item id`);
     if (expectedKind === "unit_mapping") {
-      if (item.kind !== "architecture" && item.kind !== "shared") {
+      if (item.kind !== "implementation" && item.kind !== "shared") {
         throw new Error(`Unit ${item.id} has invalid kind`);
       }
-      requireStringArray(item.architectureModules, `Unit ${item.id} architectureModules`);
+      requireStringArray(item.architectureRoles, `Unit ${item.id} architectureRoles`);
       requireText(item.responsibility, `Unit ${item.id} responsibility`);
       requireText(item.rationale, `Unit ${item.id} rationale`);
     } else if (expectedKind === "shared_ownership") {
@@ -3652,225 +3826,6 @@ function validateTopologyPatchShape(
     }
   }
   return structuredClone(value) as Stage2TopologyPlanPatch;
-}
-
-function validateDesignProposal(value: unknown, moduleId: string): Stage2DesignProposal {
-  const record = objectValue(value, "Stage2 Design proposal");
-  if (record.schemaVersion !== 1 || record.moduleId !== moduleId) {
-    throw new Error(`Stage2 Design proposal does not target ${moduleId}`);
-  }
-  const proposal = value as Stage2DesignProposal;
-  requireText(proposal.summary, "Design summary");
-  for (const [label, items] of [
-    ["architectureReferences", proposal.architectureReferences],
-    ["sourceReferences", proposal.sourceReferences],
-    ["explicitExclusions", proposal.explicitExclusions],
-    ["interfaces", proposal.interfaces],
-    ["cycleBehavior", proposal.cycleBehavior],
-    ["exceptionalBehavior", proposal.exceptionalBehavior],
-    ["invariants", proposal.invariants],
-    ["sharedInterfaceChanges", proposal.sharedInterfaceChanges],
-    ["affectedModules", proposal.affectedModules],
-    ["risks", proposal.risks],
-    ["openQuestions", proposal.openQuestions],
-  ] as const) {
-    requireStringArray(items, label);
-  }
-  if (!Array.isArray(proposal.fields) || !Array.isArray(proposal.events)) {
-    throw new Error("Design fields and events must be arrays");
-  }
-  for (const field of proposal.fields) {
-    requireText(field.name, "Design field name");
-    requireText(field.semantics, `Design field ${field.name} semantics`);
-    requireText(field.producer, `Design field ${field.name} producer`);
-    requireText(field.storage, `Design field ${field.name} storage`);
-    requireStringArray(field.consumers, `Design field ${field.name} consumers`);
-    requireText(field.lifetime, `Design field ${field.name} lifetime`);
-  }
-  for (const event of proposal.events) {
-    requireText(event.name, "Design event name");
-    requireText(event.condition, `Design event ${event.name} condition`);
-    requireStringArray(event.effects, `Design event ${event.name} effects`);
-    requireText(event.priority, `Design event ${event.name} priority`);
-  }
-  requireStringArray(proposal.implementation?.sourcePaths, "implementation.sourcePaths");
-  requireStringArray(proposal.implementation?.testPaths, "implementation.testPaths");
-  for (const path of proposal.implementation.sourcePaths) {
-    assertSafeRelativePath(path);
-    if (!path.replace(/\\/gu, "/").startsWith("src/main/")) {
-      throw new Error(`Stage2 source path must be under src/main: ${path}`);
-    }
-  }
-  for (const path of proposal.implementation.testPaths) {
-    assertSafeRelativePath(path);
-    if (!path.replace(/\\/gu, "/").startsWith("src/test/")) {
-      throw new Error(`Stage2 test path must be under src/test: ${path}`);
-    }
-  }
-  const allPaths = [...proposal.implementation.sourcePaths, ...proposal.implementation.testPaths];
-  if (new Set(allPaths.map(portablePathKey)).size !== allPaths.length) {
-    throw new Error("Stage2 Design implementation paths must be unique");
-  }
-  requireStringArray(proposal.acceptance?.assertions, "acceptance.assertions");
-  requireStringArray(proposal.acceptance?.directedTests, "acceptance.directedTests");
-  requireStringArray(proposal.acceptance?.expectedResults, "acceptance.expectedResults");
-  if (!Array.isArray(proposal.acceptance?.commands)) {
-    throw new Error("Stage2 Design verification commands must be an array");
-  }
-  proposal.acceptance.commands.forEach(validateCommandSpec);
-  const commandIds = proposal.acceptance.commands.map((command) => command.id);
-  if (new Set(commandIds).size !== commandIds.length) {
-    throw new Error("Stage2 Design verification command ids must be unique");
-  }
-  return structuredClone(proposal);
-}
-
-function validateImplementationProposal(
-  value: unknown,
-  module: Stage2ModuleState,
-  designSha256: string,
-): Stage2ImplementationProposal {
-  const record = objectValue(value, "Stage2 implementation proposal");
-  if (
-    record.schemaVersion !== 1
-    || record.moduleId !== module.id
-    || record.designSha256 !== designSha256
-  ) {
-    throw new Error(`Stage2 implementation proposal does not match ${module.id} Design`);
-  }
-  const proposal = value as Stage2ImplementationProposal;
-  requireText(proposal.summary, "Implementation summary");
-  requireStringArray(proposal.notes, "Implementation notes");
-  if (!Array.isArray(proposal.files)) {
-    throw new Error("Implementation files must be an array");
-  }
-  for (const file of proposal.files) {
-    requireText(file.path, "Implementation file path");
-    if (file.kind !== "source" && file.kind !== "test") {
-      throw new Error(`Invalid implementation file kind for ${file.path}`);
-    }
-    if (file.baseSha256 !== null && !/^[a-f0-9]{64}$/u.test(file.baseSha256)) {
-      throw new Error(`Invalid baseSha256 for ${file.path}`);
-    }
-    if (typeof file.content !== "string") {
-      throw new Error(`Implementation file ${file.path} has no content`);
-    }
-    requireText(file.purpose, `Implementation file ${file.path} purpose`);
-  }
-  if (proposal.designGap !== null) {
-    requireText(proposal.designGap.reason, "Design gap reason");
-    requireText(proposal.designGap.counterexample, "Design gap counterexample");
-    if (proposal.files.length > 0) {
-      throw new Error("An implementation proposal with a Design gap cannot include file writes");
-    }
-  }
-  return structuredClone(proposal);
-}
-
-function validateReviewReport(
-  value: unknown,
-  module: Stage2ModuleState,
-  kind: Stage2ReviewReport["kind"],
-  designSha256: string,
-  implementationSha256: string,
-): Stage2ReviewReport {
-  const record = objectValue(value, "Stage2 review report");
-  if (
-    record.schemaVersion !== 1
-    || record.kind !== kind
-    || record.moduleId !== module.id
-    || record.designSha256 !== designSha256
-    || record.implementationAggregateSha256 !== implementationSha256
-  ) {
-    throw new Error(`Stage2 ${kind} report does not match ${module.id}`);
-  }
-  const report = value as Stage2ReviewReport;
-  if (report.verdict !== "pass" && report.verdict !== "fail") {
-    throw new Error(`Invalid ${kind} verdict`);
-  }
-  requireText(report.summary, `${kind} summary`);
-  if (!Array.isArray(report.findings) || !Array.isArray(report.commandResults)) {
-    throw new Error(`${kind} report is incomplete`);
-  }
-  for (const finding of report.findings) {
-    if (!["error", "warning", "note"].includes(finding.severity)) {
-      throw new Error(`Invalid finding severity in ${kind} report`);
-    }
-    requireText(finding.code, "Review finding code");
-    requireText(finding.message, `Review finding ${finding.code} message`);
-    requireText(finding.artifact, `Review finding ${finding.code} artifact`);
-    requireText(finding.requiredAction, `Review finding ${finding.code} required action`);
-  }
-  if (report.verdict === "pass" && report.findings.some((finding) => finding.severity === "error")) {
-    throw new Error(`${kind} report passed with error findings`);
-  }
-  report.commandResults.forEach(validateCommandResult);
-  if (kind === "static" && report.commandResults.length > 0) {
-    throw new Error("Static review report must not contain command results");
-  }
-  if (
-    kind === "verification"
-    && report.verdict === "pass"
-    && report.commandResults.some((result) => result.required && !result.ok)
-  ) {
-    throw new Error("Verification report passed while a required command failed");
-  }
-  return structuredClone(report);
-}
-
-function validateCommandSpec(value: CommandSpec): void {
-  requireText(value.id, "Command id");
-  requireText(value.description, `Command ${value.id} description`);
-  if (value.runner !== "host" && value.runner !== "wsl") {
-    throw new Error(`Invalid runner for ${value.id}`);
-  }
-  if (typeof value.required !== "boolean") {
-    throw new Error(`Command ${value.id} required must be boolean`);
-  }
-  if (value.runner === "host") {
-    requireText(value.command, `Command ${value.id} command`);
-  } else {
-    requireText(value.script, `Command ${value.id} script`);
-  }
-}
-
-function validateCommandResult(value: CommandResult): void {
-  requireText(value.id, "Command result id");
-  requireText(value.description, `Command result ${value.id} description`);
-  requireText(value.command, `Command result ${value.id} command`);
-  requireText(value.checkedAt, `Command result ${value.id} checkedAt`);
-  if (value.runner !== "host" && value.runner !== "wsl") {
-    throw new Error(`Invalid command result runner for ${value.id}`);
-  }
-  if (typeof value.ok !== "boolean" || typeof value.required !== "boolean") {
-    throw new Error(`Invalid command result booleans for ${value.id}`);
-  }
-}
-
-function requireText(value: unknown, label: string): asserts value is string {
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(`${label} is required`);
-  }
-}
-
-function requireStringArray(
-  value: unknown,
-  label: string,
-  nonempty = false,
-): asserts value is string[] {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === "")) {
-    throw new Error(`${label} must be a string array`);
-  }
-  if (nonempty && value.length === 0) {
-    throw new Error(`${label} cannot be empty`);
-  }
-}
-
-function objectValue(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`${label} must be an object`);
-  }
-  return value as Record<string, unknown>;
 }
 
 function workerEvidence(
@@ -3966,1018 +3921,4 @@ async function syncVerificationDocument(root: string, module: Stage2ModuleState)
   const content = renderVerificationDocument(module);
   await atomicWriteText(resolveWithin(root, verification.documentPath), content);
   verification.documentSha256 = sha256(content);
-}
-
-function renderImplementationPlanDocument(
-  state: Stage1ProjectState,
-  stage2: Stage2ProjectStage,
-  status: "待决策" | "调研阻塞" | "待批准" | "需修订" | "已批准",
-): string {
-  const topology = stage2.topology;
-  const current = currentTopologyDecision(stage2);
-  const lines = [
-    "# Stage2 Implementation Plan",
-    "",
-    `状态：${status}`,
-    "",
-    `Plan revision：${String(topology.planRevision)}`,
-    "",
-    `Stage2 revision：${String(stage2.revision)}`,
-    "",
-    `Architecture approval：\`${state.stage1.approval?.aggregateSha256 ?? "missing"}\``,
-    "",
-    "## Topology Decisions",
-    "",
-    "| Decision | 主题 | 状态 | 结论 |",
-    "|---|---|---|---|",
-    ...topology.decisionOrder.map((id) => {
-      const decision = requireTopologyDecision(stage2, id);
-      return `| \`${id}\` | ${table(decision.spec.topic)} | ${decision.status} | ${table(decision.resolution?.conclusion ?? "未确认")} |`;
-    }),
-    "",
-  ];
-  if (stage2.architectureRework !== undefined) {
-    const rework = stage2.architectureRework;
-    lines.push(
-      "## Architecture Rework",
-      "",
-      `ID：\`${rework.id}\``,
-      "",
-      `状态：\`${rework.status}\``,
-      "",
-      `Stage1 修正目标：\`${rework.repair.kind}:${rework.repair.target}\``,
-      "",
-      `受影响 Topology Decisions：${rework.affectedTopologyDecisions.map((id) => `\`${id}\``).join("、")}`,
-      "",
-      `受影响 Units：${rework.affectedUnits.length === 0 ? "尚无已物化 Unit" : rework.affectedUnits.map((id) => `\`${id}\``).join("、")}`,
-      "",
-      rework.summary,
-      "",
-    );
-  }
-  if (current?.proposal !== undefined) {
-    lines.push(
-      `## 当前 Decision：${current.spec.id}`,
-      "",
-      current.spec.question,
-      "",
-      current.proposal.summary,
-      "",
-      `推荐：\`${current.proposal.recommendation}\``,
-      "",
-      "| Option | 概要 | 收益 | 成本 | 风险 |",
-      "|---|---|---|---|---|",
-      ...current.proposal.options.map((option) =>
-        `| \`${option.id}\` | ${table(option.summary)} | ${table(option.benefits.join("<br>") || "无")} | ${table(option.costs.join("<br>") || "无")} | ${table(option.risks.join("<br>") || "无")} |`
-      ),
-      "",
-      ...current.proposal.options.flatMap((option) =>
-        renderTopologyOptionPatch(option, option.id === current.proposal?.recommendation)
-      ),
-      ...renderList("推荐理由", current.proposal.rationale),
-      ...renderList("已知架构事实", current.proposal.architectureFacts),
-      ...renderList("源码与来源证据", current.proposal.sourceEvidence),
-      ...renderList("仍未知", current.proposal.unknowns),
-      ...renderList("待回答问题", current.proposal.openQuestions),
-    );
-  }
-  lines.push(
-    "## Implementation Units",
-    "",
-    "| Unit | 类型 | Architecture 映射 | 职责 |",
-    "|---|---|---|---|",
-    ...(topology.plan.units.length === 0
-      ? ["| 未确定 | | | |"]
-      : topology.plan.units.map((unit) =>
-        `| \`${unit.id}\` | ${unit.kind} | ${table(unit.architectureModules.join("、") || "无")} | ${table(unit.responsibility)} |`
-      )),
-    "",
-    "## Shared Ownership",
-    "",
-    "| 产物 | 类型 | Owner Unit | 消费者 | 路径 |",
-    "|---|---|---|---|---|",
-    ...(topology.plan.sharedArtifacts.length === 0
-      ? ["| 无 | | | | |"]
-      : topology.plan.sharedArtifacts.map((artifact) =>
-        `| \`${artifact.id}\` | ${artifact.kind} | \`${artifact.ownerUnit}\` | ${table(artifact.consumerUnits.join("、") || "无")} | ${table(artifact.sourcePaths.join("、") || "无")} |`
-      )),
-    "",
-    "## Interface Contracts",
-    "",
-    "| Interface | Owner | Producer | Consumer | 字段 | 时序边界 |",
-    "|---|---|---|---|---|---|",
-    ...(topology.plan.interfaces.length === 0
-      ? ["| 未确定 | | | | | |"]
-      : topology.plan.interfaces.map((contract) =>
-        `| \`${contract.id}\` | \`${contract.ownerUnit}\` | ${table(contract.producerUnits.join("、"))} | ${table(contract.consumerUnits.join("、"))} | ${table(contract.fields.join("、"))} | ${table(`${contract.boundary}；${contract.timing}`)} |`
-      )),
-    "",
-    "## 源码、DAG 与完成条件",
-    "",
-    "| Unit | Design | 源码 | 测试 | 依赖 | Wave | 完成条件 |",
-    "|---|---|---|---|---|---:|---|",
-    ...(topology.plan.units.length === 0
-      ? ["| 未确定 | | | | | | |"]
-      : topology.plan.units.map((unit) =>
-        `| \`${unit.id}\` | ${table(unit.designPath || "未确定")} | ${table(unit.sourcePaths.join("、") || "未确定")} | ${table(unit.testPaths.join("、") || "未确定")} | ${table(unit.dependsOn.join("、") || "无")} | ${unit.wave === null ? "" : String(unit.wave)} | ${table(unit.completionCriteria.join("、") || "未确定")} |`
-      )),
-    "",
-  );
-  if (topology.review !== undefined) {
-    lines.push(
-      "## Topology Review",
-      "",
-      `verdict: \`${topology.review.verdict}\``,
-      "",
-      ...(topology.review.issues.length === 0
-        ? ["- 无阻塞项"]
-        : topology.review.issues.map((issue) => `- ${issue}`)),
-      "",
-    );
-  }
-  if (topology.migration !== undefined) {
-    lines.push(
-      "## Legacy Migration",
-      "",
-      `来源 revision：${String(topology.migration.sourceRevision)}`,
-      "",
-      ...topology.migration.draftIndexes.map((draft) =>
-        `- \`${draft.designPath}\`，runId=\`${draft.runId}\`，threadId=\`${draft.threadId}\``
-      ),
-      "",
-    );
-  }
-  return `${lines.join("\n").replace(/\n{3,}/gu, "\n\n").trimEnd()}\n`;
-}
-
-function renderTopologyOptionPatch(
-  option: Stage2TopologyProposal["options"][number],
-  recommended: boolean,
-): string[] {
-  const heading = `### Option \`${option.id}\`${recommended ? "（推荐）" : ""}`;
-  const patch = option.patch;
-  switch (patch.kind) {
-    case "unit_mapping":
-      return [
-        heading,
-        "",
-        "| Unit | 类型 | Architecture 映射 | 职责 | 理由 |",
-        "|---|---|---|---|---|",
-        ...patch.units.map((unit) =>
-          `| \`${unit.id}\` | ${unit.kind} | ${table(unit.architectureModules.join("、") || "无")} | ${table(unit.responsibility)} | ${table(unit.rationale)} |`
-        ),
-        "",
-      ];
-    case "shared_ownership":
-      return [
-        heading,
-        "",
-        "| 共享产物 | 类型 | Owner | 消费者 | 路径 | 理由 |",
-        "|---|---|---|---|---|---|",
-        ...(patch.sharedArtifacts.length === 0
-          ? ["| 无 | | | | | |"]
-          : patch.sharedArtifacts.map((artifact) =>
-            `| \`${artifact.id}\` | ${artifact.kind} | \`${artifact.ownerUnit}\` | ${table(artifact.consumerUnits.join("、") || "无")} | ${table(artifact.sourcePaths.join("、") || "无")} | ${table(artifact.rationale)} |`
-          )),
-        "",
-      ];
-    case "interface_ownership":
-      return [
-        heading,
-        "",
-        "| Interface | Owner | Producer | Consumer | 字段 | 边界与时序 |",
-        "|---|---|---|---|---|---|",
-        ...patch.interfaces.map((contract) =>
-          `| \`${contract.id}\` | \`${contract.ownerUnit}\` | ${table(contract.producerUnits.join("、"))} | ${table(contract.consumerUnits.join("、"))} | ${table(contract.fields.join("、"))} | ${table(`${contract.boundary}；${contract.timing}`)} |`
-        ),
-        "",
-      ];
-    case "source_topology":
-      return [
-        heading,
-        "",
-        "| Unit | Package | Design | 源码 | 测试 | 集成 |",
-        "|---|---|---|---|---|---|",
-        ...patch.units.map((unit) =>
-          `| \`${unit.id}\` | \`${unit.packageName}\` | ${table(unit.designPath)} | ${table(unit.sourcePaths.join("、") || "无")} | ${table(unit.testPaths.join("、") || "无")} | ${table(unit.integrationPaths.join("、") || "无")} |`
-        ),
-        "",
-      ];
-    case "unit_dag":
-      return [
-        heading,
-        "",
-        "| Unit | 前置 Unit | 集成消费者 |",
-        "|---|---|---|",
-        ...patch.units.map((unit) =>
-          `| \`${unit.id}\` | ${table(unit.dependsOn.join("、") || "无")} | ${table(unit.integrationConsumers.join("、") || "无")} |`
-        ),
-        "",
-      ];
-    case "completion":
-      return [
-        heading,
-        "",
-        "| Unit | 完成条件 | 验证责任 |",
-        "|---|---|---|",
-        ...patch.units.map((unit) =>
-          `| \`${unit.id}\` | ${table(unit.completionCriteria.join("<br>"))} | ${table(unit.verificationResponsibility)} |`
-        ),
-        "",
-      ];
-  }
-}
-
-function renderDesignDocument(
-  module: Stage2ModuleState,
-  proposal: Stage2DesignProposal,
-  revision: number,
-  status: "待确认" | "已批准" | "需修订",
-  skills: Stage2SkillReference[],
-  verificationMode?: Stage2VerificationMode,
-): string {
-  const lines = [
-    `# ${module.id} Implementation Unit Design`,
-    "",
-    `状态：${status}`,
-    "",
-    `Design revision：${String(revision)}`,
-    "",
-    `Unit ID：\`${module.id}\``,
-    "",
-    "## 职责与范围",
-    "",
-    proposal.summary,
-    "",
-    `Architecture 职责：${module.architecture.responsibility}`,
-    "",
-    ...renderList("Architecture 引用", proposal.architectureReferences),
-    ...renderList("源码参考", proposal.sourceReferences),
-    ...renderList("显式排除", proposal.explicitExclusions),
-    ...renderList("接口", proposal.interfaces),
-    "## 字段与所有权",
-    "",
-    "| 字段 | 语义 | 生产者 | 存储点 | 消费者 | 有效期 |",
-    "|---|---|---|---|---|---|",
-    ...proposal.fields.map((field) =>
-      `| ${table(field.name)} | ${table(field.semantics)} | ${table(field.producer)} | ${table(field.storage)} | ${table(field.consumers.join("、"))} | ${table(field.lifetime)} |`
-    ),
-    "",
-    "## 事件与优先级",
-    "",
-    ...proposal.events.flatMap((event) => [
-      `### ${event.name}`,
-      "",
-      `条件：${event.condition}`,
-      "",
-      `优先级：${event.priority}`,
-      "",
-      ...event.effects.map((effect) => `- ${effect}`),
-      "",
-    ]),
-    ...renderList("周期行为", proposal.cycleBehavior),
-    ...renderList("异常与控制路径", proposal.exceptionalBehavior),
-    ...renderList("不变量", proposal.invariants),
-    ...renderList("共享接口变化", proposal.sharedInterfaceChanges),
-    ...renderList("受影响 Unit", proposal.affectedModules),
-    "## 实现范围",
-    "",
-    "源码路径：",
-    "",
-    ...proposal.implementation.sourcePaths.map((path) => `- \`${path}\``),
-    "",
-    "测试路径：",
-    "",
-    ...proposal.implementation.testPaths.map((path) => `- \`${path}\``),
-    "",
-    ...renderList("断言", proposal.acceptance.assertions),
-    ...renderList("定向测试", proposal.acceptance.directedTests),
-    ...renderList("预期结果", proposal.acceptance.expectedResults),
-    "## 验证命令",
-    "",
-    ...proposal.acceptance.commands.map((command) =>
-      `- \`${command.id}\` [${command.runner}] ${command.description}，required=${String(command.required)}，${command.runner === "wsl" ? command.script : [command.command, ...(command.args ?? [])].join(" ")}`
-    ),
-    "",
-    "## 方法来源",
-    "",
-    ...skills.map((skill) => `- \`${skill.id}\`：\`${skill.contentHash}\``),
-    "",
-    ...(verificationMode === undefined
-      ? []
-      : ["## 用户确认", "", `验证模式：\`${verificationMode}\``, ""]),
-    ...renderList("风险", proposal.risks),
-    ...renderList("未决问题", proposal.openQuestions),
-  ];
-  return `${lines.join("\n").replace(/\n{3,}/gu, "\n\n").trimEnd()}\n`;
-}
-
-function renderVerificationDocument(module: Stage2ModuleState): string {
-  const verification = requireVerification(module);
-  const lines = [
-    `# ${module.id} 验证记录`,
-    "",
-    `模块状态：${module.status}`,
-    "",
-    `验证模式：\`${verification.mode}\``,
-    "",
-    `independent: ${String(verification.independent)}`,
-    "",
-    `waivedByUser: ${String(verification.waivedByUser)}`,
-    "",
-    "## 主验证",
-    "",
-    ...renderCommandResults(verification.primaryCommands),
-    ...(verification.finalCommands === undefined
-      ? []
-      : ["", "## 最终命令复验", "", ...renderCommandResults(verification.finalCommands)]),
-    ...renderWorkerReport("静态审查", verification.staticReview),
-    ...renderWorkerReport("验证审查", verification.verificationReview),
-    "",
-    "## 阻塞项",
-    "",
-    ...(module.blockers.length === 0 ? ["- 无"] : module.blockers.map((item) => `- ${item}`)),
-    "",
-    `完成时间：${verification.completedAt ?? "未完成"}`,
-  ];
-  return `${lines.join("\n").replace(/\n{3,}/gu, "\n\n").trimEnd()}\n`;
-}
-
-function renderCommandResults(results: CommandResult[]): string[] {
-  if (results.length === 0) {
-    return ["- 尚无命令证据"];
-  }
-  return results.flatMap((result) => [
-    `- \`${result.id}\`: ${result.ok ? "通过" : "失败"}，runner=${result.runner}，exitCode=${String(result.exitCode)}`,
-    `  - command: \`${result.command}\``,
-    `  - checkedAt: ${result.checkedAt}`,
-    ...(result.output === "" ? [] : [`  - output: ${result.output.replace(/\r?\n/gu, " ")}`]),
-  ]);
-}
-
-function renderWorkerReport(title: string, evidence: Stage2WorkerEvidence | undefined): string[] {
-  if (evidence === undefined) {
-    return ["", `## ${title}`, "", "- 尚未执行"];
-  }
-  return [
-    "",
-    `## ${title}`,
-    "",
-    `- performedBy: ${evidence.performedBy}`,
-    `- runId: \`${evidence.runId}\``,
-    `- threadId: ${evidence.threadId === undefined ? "未记录" : `\`${evidence.threadId}\``}`,
-    `- skills: ${evidence.skills.map((skill) => `\`${skill.id}@${skill.contentHash}\``).join("、")}`,
-    `- verdict: ${evidence.report.verdict}`,
-    `- summary: ${evidence.report.summary}`,
-    ...evidence.report.findings.map((finding) =>
-      `- [${finding.severity}] ${finding.code}: ${finding.message}，artifact=${finding.artifact}，action=${finding.requiredAction}`
-    ),
-  ];
-}
-
-function renderList(title: string, items: string[]): string[] {
-  return [
-    `## ${title}`,
-    "",
-    ...(items.length === 0 ? ["- 无"] : items.map((item) => `- ${item}`)),
-    "",
-  ];
-}
-
-function table(value: string): string {
-  return value.replace(/\|/gu, "\\|").replace(/\r?\n/gu, " ");
-}
-
-const PROJECT_READER_INSTRUCTION = `项目文件的枚举、搜索和读取必须使用 processor_project MCP 的 list_files、search_text 和 read_file。不得依赖 Shell、PowerShell、cmd 或交互会话 execpolicy 读取项目证据。`;
-
-function buildTopologyResearchPrompt(
-  envelope: Stage2TaskEnvelope,
-  state: Stage1ProjectState,
-  instruction: string | undefined,
-  skillContext: string,
-): string {
-  const decision = envelope.topology?.decision;
-  if (decision === undefined) {
-    throw new Error("Topology Research Task Envelope is missing its Decision");
-  }
-  return `你是 Stage2 的短生命周期 Topology Research Worker。只为 ${decision.id} 收集证据，不提交拓扑方案，不修改任何文件。
-
-${PROJECT_READER_INSTRUCTION}
-
-读取 AGENTS.md、已批准 Architecture、现有源码、测试和构建组织。每个 fact 必须指向 sources 中的 locator，locations 给出可复查的文件与行号或文档位置。找不到支撑当前决策的证据时，evidenceSufficient 必须为 false，并在 gaps 中说明缺口。不使用聊天记忆替代项目证据。自然语言使用简体中文，最终只输出符合 Schema 的 JSON。
-
-本轮用户调研关注点只用于确定证据搜索范围，不能作为已确认事实或拓扑结论：
-${instruction?.trim() || "无。"}
-
-Skill Context：
-${skillContext}
-
-Task Envelope：
-${JSON.stringify(envelope, null, 2)}
-
-Stage1 Architecture：
-${JSON.stringify(state.stage1.projectSpec?.architecture ?? {}, null, 2)}
-`;
-}
-
-function buildTopologyPlannerPrompt(
-  envelope: Stage2TaskEnvelope,
-  state: Stage1ProjectState,
-  instruction: string | undefined,
-  customConclusion: string | undefined,
-  skillContext: string,
-): string {
-  const topology = envelope.topology;
-  if (topology === undefined) {
-    throw new Error("Topology Planner Task Envelope is missing its Decision");
-  }
-  const customRule = customConclusion === undefined
-    ? "提供 2 到 3 个可明确选择的候选项，userConclusion 返回 null。"
-    : `用户已明确给出结论：${customConclusion}\nuserConclusion 必须逐字返回该结论，options 只能包含一个 id=custom 的结构化选项，recommendation 必须为 custom。`;
-  return `你是 Stage2 Topology Planner。本轮只处理 ${topology.decision.id} ${topology.decision.topic}，不修改文件，不实现 RTL，不替用户批准。
-
-${PROJECT_READER_INSTRUCTION}
-
-严格使用 Task Envelope 中已确认结论和当前 Plan。researchPolicy=required 时只能基于 envelope.topology.evidence 形成候选。每个 option.patch 只允许修改当前 Decision kind 对应的结构切片，不得提前闭合后续 Decision。${customRule}
-
-对每个候选记录收益、成本、风险、不采用后果，以及受影响 Unit、Interface、路径和 DAG edge。存在无法安全做出选择的信息缺口时写入 openQuestions，Harness 将拒绝提交。自然语言使用简体中文，最终只输出符合 Schema 的 JSON。
-
-Skill Context：
-${skillContext}
-
-Task Envelope：
-${JSON.stringify(envelope, null, 2)}
-
-Stage1 Architecture：
-${JSON.stringify(state.stage1.projectSpec?.architecture ?? {}, null, 2)}
-
-本轮用户指令：
-${instruction?.trim() || "无。"}
-`;
-}
-
-function buildShadowPrompt(
-  envelope: Stage2TaskEnvelope,
-  module: Stage2ModuleState,
-  instruction?: string,
-  skillContext?: string,
-): string {
-  return `你是 Stage2 Shadow Align。只负责闭合 ${module.id} 的模块 Design，不修改任何文件，不实现 RTL。
-
-${PROJECT_READER_INSTRUCTION}
-
-读取 AGENTS.md、Task Envelope 中列出的 Architecture 文档、相关源码和测试。区分已批准事实、当前源码和提议行为。闭合接口、字段、生产者、存储点、消费者、有效期、事件、同拍优先级、周期边界、stall、flush、kill、retry、late response、reset、所有权、复用、不变量、实现路径和验收条件。architectureReferences 和 sourceReferences 的每一项只能填写项目内实际存在的相对路径，不得附加状态、哈希或说明；没有源码引用时返回空数组。
-
-不得改变 Stage1 的 ISA、全局流水边界、模块职责和共享协议。不能闭合的正确性或接口问题进入 openQuestions。verification commands 必须可由 Harness 直接执行。host command 填写 command 和 args，script 填空字符串；WSL command 填写 script 并使用 {{projectWslPath}} 占位符，command 填空字符串且 args 填空数组。自然语言使用简体中文。最终只输出符合 Schema 的 JSON。
-
-Task Envelope 的角色、权限、产物和门禁优先于 Skill 中的通用工作流建议。
-
-Skill Context：
-${skillContext ?? "无"}
-
-Task Envelope：
-${JSON.stringify(envelope, null, 2)}
-
-Architecture Module：
-${JSON.stringify(module.architecture, null, 2)}
-
-本轮用户修订指令：
-${instruction?.trim() || "首次闭合，无附加修订指令。"}
-`;
-}
-
-function buildImplementationPrompt(
-  envelope: Stage2TaskEnvelope,
-  design: Stage2DesignProposal,
-  skillContext: string,
-): string {
-  return `你是 Stage2 Active Coding。已批准 Design 对你只读。读取 AGENTS.md、Architecture、Design、现有源码和测试，形成最小 Chisel 实现提案。
-
-${PROJECT_READER_INSTRUCTION}
-
-你没有项目写权限。files 必须给出允许路径中文件的完整内容。已有文件的 baseSha256 填当前内容 SHA-256，新文件填 null。不得返回允许范围外的路径，不得修改 Architecture、Design 或 .assistant。发现 Design 缺口时 files 必须为空，并填写 designGap 的原因和具体反例。不得自行增加协议、状态、流水级、tag、generation 或扩大串行化。自然语言使用简体中文。最终只输出符合 Schema 的 JSON。
-
-Task Envelope 的角色、权限、产物和门禁优先于 Skill 中的通用工作流建议。
-
-Skill Context：
-${skillContext}
-
-Task Envelope：
-${JSON.stringify(envelope, null, 2)}
-
-Approved Design：
-${JSON.stringify(design, null, 2)}
-`;
-}
-
-function buildReviewPrompt(
-  envelope: Stage2TaskEnvelope,
-  module: Stage2ModuleState,
-  kind: Stage2ReviewReport["kind"],
-  commandResults: CommandResult[],
-  skillContext: string,
-): string {
-  return `你是 Stage2 ${kind === "static" ? "Static Review" : "Verification Review"} 执行者。读取 AGENTS.md、已批准 Design、当前实现和测试。不得修改文件。
-
-${PROJECT_READER_INSTRUCTION}
-
-静态审查检查 Architecture 与 Design 一致性、Chisel 语义、状态更新优先级、边界条件、越权改动和测试缺口，commandResults 返回空数组。验证审查检查 Harness 提供的命令证据、定向场景、断言和失败可复现性，并原样保留 commandResults 的 id 顺序和 ok 结果。存在 correctness error 时 verdict 必须为 fail。自然语言使用简体中文。最终只输出符合 Schema 的 JSON。
-
-Task Envelope 的角色、权限、产物和门禁优先于 Skill 中的通用工作流建议。
-
-Skill Context：
-${skillContext}
-
-Task Envelope：
-${JSON.stringify(envelope, null, 2)}
-
-Module State：
-${JSON.stringify(module, null, 2)}
-
-Harness Command Evidence：
-${JSON.stringify(commandResults, null, 2)}
-`;
-}
-
-function buildIndependentVerificationPrompt(
-  envelope: Stage2TaskEnvelope,
-  module: Stage2ModuleState,
-  commands: CommandSpec[],
-  verificationWorkspace: string,
-  skillContext: string,
-): string {
-  const wslWorkspace = shellQuote(toWslPath(verificationWorkspace));
-  const executableCommands = commands.map((command) => {
-    if (command.runner === "host") {
-      return {
-        ...command,
-        executable: [command.command, ...(command.args ?? [])].join(" "),
-      };
-    }
-    const script = (command.script ?? "").replace(/\{\{projectWslPath\}\}/gu, wslWorkspace);
-    return {
-      ...command,
-      executable: `wsl.exe -e bash -lc ${JSON.stringify(script)}`,
-    };
-  });
-  return `你是独立 Stage2 Verification Worker。当前目录是正式项目的隔离副本。你可以写构建缓存和测试输出，不得修改 Architecture、Design、源码或测试。
-
-项目文件的枚举、搜索和读取使用 processor_project MCP。Shell 只用于执行下方 Approved Commands。
-
-逐项执行下方 executable 命令。记录每项 id、description、runner、实际 command、required、ok、exitCode、output 和 checkedAt。检查测试是否覆盖 Design 验收条件。任何 required command 失败时 verdict 必须为 fail。自然语言使用简体中文。最终只输出符合 Schema 的 JSON。
-
-Task Envelope 的角色、权限、产物和门禁优先于 Skill 中的通用工作流建议。
-
-Skill Context：
-${skillContext}
-
-Task Envelope：
-${JSON.stringify(envelope, null, 2)}
-
-Module State：
-${JSON.stringify(module, null, 2)}
-
-Approved Commands：
-${JSON.stringify(executableCommands, null, 2)}
-`;
-}
-
-function topologyResearchSchema(decisionId: string): object {
-  const stringArray = { type: "array", items: { type: "string" } };
-  return {
-    type: "object",
-    additionalProperties: false,
-    required: [
-      "schemaVersion",
-      "decisionId",
-      "sources",
-      "facts",
-      "conflicts",
-      "gaps",
-      "evidenceSufficient",
-      "stopReason",
-    ],
-    properties: {
-      schemaVersion: { type: "integer", enum: [1] },
-      decisionId: { type: "string", enum: [decisionId] },
-      sources: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["kind", "locator", "revision", "accessedAt", "locations"],
-          properties: {
-            kind: { type: "string", enum: ["project", "url", "repository", "paper", "other"] },
-            locator: { type: "string" },
-            revision: { type: "string" },
-            accessedAt: { type: "string" },
-            locations: stringArray,
-          },
-        },
-      },
-      facts: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["claim", "source", "confidence"],
-          properties: {
-            claim: { type: "string" },
-            source: { type: "string" },
-            confidence: { type: "string", enum: ["low", "medium", "high"] },
-          },
-        },
-      },
-      conflicts: stringArray,
-      gaps: stringArray,
-      evidenceSufficient: { type: "boolean" },
-      stopReason: { type: "string" },
-    },
-  };
-}
-
-function topologyProposalSchema(
-  decision: Stage2TopologyDecisionSpec,
-  customConclusion: string | undefined,
-): object {
-  const stringArray = { type: "array", items: { type: "string" } };
-  const required = [
-    "schemaVersion",
-    "decisionId",
-    "kind",
-    "summary",
-    "architectureFacts",
-    "sourceEvidence",
-    "unknowns",
-    "options",
-    "recommendation",
-    "rationale",
-    "openQuestions",
-    "affectedDecisions",
-    "userConclusion",
-  ];
-  return {
-    type: "object",
-    additionalProperties: false,
-    required,
-    properties: {
-      schemaVersion: { type: "integer", enum: [1] },
-      decisionId: { type: "string", enum: [decision.id] },
-      kind: { type: "string", enum: [decision.kind] },
-      summary: { type: "string" },
-      architectureFacts: stringArray,
-      sourceEvidence: stringArray,
-      unknowns: stringArray,
-      options: {
-        type: "array",
-        minItems: customConclusion === undefined ? 2 : 1,
-        maxItems: customConclusion === undefined ? 3 : 1,
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: [
-            "id",
-            "label",
-            "summary",
-            "benefits",
-            "costs",
-            "risks",
-            "notChoosingConsequences",
-            "affectedUnits",
-            "affectedInterfaces",
-            "affectedSourcePaths",
-            "affectedDagEdges",
-            "patch",
-          ],
-          properties: {
-            id: customConclusion === undefined ? { type: "string" } : { type: "string", enum: ["custom"] },
-            label: { type: "string" },
-            summary: { type: "string" },
-            benefits: stringArray,
-            costs: stringArray,
-            risks: stringArray,
-            notChoosingConsequences: stringArray,
-            affectedUnits: stringArray,
-            affectedInterfaces: stringArray,
-            affectedSourcePaths: stringArray,
-            affectedDagEdges: stringArray,
-            patch: topologyPatchSchema(decision.kind),
-          },
-        },
-      },
-      recommendation: customConclusion === undefined
-        ? { type: "string" }
-        : { type: "string", enum: ["custom"] },
-      rationale: stringArray,
-      openQuestions: stringArray,
-      affectedDecisions: stringArray,
-      userConclusion: customConclusion === undefined
-        ? { type: ["string", "null"] }
-        : { type: "string", enum: [customConclusion] },
-    },
-  };
-}
-
-function topologyPatchSchema(kind: Stage2TopologyDecisionKind): object {
-  const stringArray = { type: "array", items: { type: "string" } };
-  const item = (required: string[], properties: Record<string, object>): object => ({
-    type: "object",
-    additionalProperties: false,
-    required,
-    properties,
-  });
-  if (kind === "unit_mapping") {
-    return topologyPatchListSchema(kind, "units", item(
-      ["id", "kind", "architectureModules", "responsibility", "rationale"],
-      {
-        id: topologyIdSchema(),
-        kind: { type: "string", enum: ["architecture", "shared"] },
-        architectureModules: stringArray,
-        responsibility: { type: "string" },
-        rationale: { type: "string" },
-      },
-    ));
-  }
-  if (kind === "shared_ownership") {
-    return topologyPatchListSchema(kind, "sharedArtifacts", item(
-      ["id", "kind", "ownerUnit", "consumerUnits", "sourcePaths", "rationale"],
-      {
-        id: topologyIdSchema(),
-        kind: { type: "string", enum: ["bundle", "payload", "config", "utility", "integration", "other"] },
-        ownerUnit: topologyIdSchema(),
-        consumerUnits: stringArray,
-        sourcePaths: topologyPathArraySchema(),
-        rationale: { type: "string" },
-      },
-    ));
-  }
-  if (kind === "interface_ownership") {
-    return topologyPatchListSchema(kind, "interfaces", item(
-      ["id", "ownerUnit", "producerUnits", "consumerUnits", "fields", "boundary", "timing"],
-      {
-        id: topologyIdSchema(),
-        ownerUnit: topologyIdSchema(),
-        producerUnits: stringArray,
-        consumerUnits: stringArray,
-        fields: stringArray,
-        boundary: { type: "string" },
-        timing: { type: "string" },
-      },
-    ));
-  }
-  if (kind === "source_topology") {
-    return topologyPatchListSchema(kind, "units", item(
-      ["id", "packageName", "designPath", "sourcePaths", "testPaths", "integrationPaths"],
-      {
-        id: topologyIdSchema(),
-        packageName: { type: "string" },
-        designPath: topologyPathSchema(),
-        sourcePaths: topologyPathArraySchema(),
-        testPaths: topologyPathArraySchema(),
-        integrationPaths: topologyPathArraySchema(),
-      },
-    ));
-  }
-  if (kind === "unit_dag") {
-    return topologyPatchListSchema(kind, "units", item(
-      ["id", "dependsOn", "integrationConsumers"],
-      { id: topologyIdSchema(), dependsOn: stringArray, integrationConsumers: stringArray },
-    ));
-  }
-  return topologyPatchListSchema(kind, "units", item(
-    ["id", "completionCriteria", "verificationResponsibility"],
-    {
-      id: topologyIdSchema(),
-      completionCriteria: stringArray,
-      verificationResponsibility: { type: "string" },
-    },
-  ));
-}
-
-function topologyPatchListSchema(kind: string, field: string, item: object): object {
-  return {
-    type: "object",
-    additionalProperties: false,
-    required: ["kind", field],
-    properties: {
-      kind: { type: "string", enum: [kind] },
-      [field]: { type: "array", items: item },
-    },
-  };
-}
-
-function topologyIdSchema(): object {
-  return { type: "string", pattern: "^[a-z][a-z0-9_]*$" };
-}
-
-function topologyPathSchema(): object {
-  return { type: "string", pattern: "^[A-Za-z0-9_. -]+(?:/[A-Za-z0-9_. -]+)*$" };
-}
-
-function topologyPathArraySchema(): object {
-  return { type: "array", items: topologyPathSchema() };
-}
-
-function designSchema(moduleId: string): object {
-  const stringArray = { type: "array", items: { type: "string" } };
-  const pathArray = {
-    type: "array",
-    items: {
-      type: "string",
-      pattern: "^[A-Za-z0-9_. -]+(?:/[A-Za-z0-9_. -]+)*$",
-    },
-  };
-  return {
-    type: "object",
-    additionalProperties: false,
-    required: [
-      "schemaVersion", "moduleId", "summary", "architectureReferences", "sourceReferences",
-      "explicitExclusions", "interfaces", "fields", "events", "cycleBehavior",
-      "exceptionalBehavior", "invariants", "sharedInterfaceChanges", "affectedModules",
-      "implementation", "acceptance", "risks", "openQuestions",
-    ],
-    properties: {
-      schemaVersion: { type: "integer", enum: [1] },
-      moduleId: { type: "string", enum: [moduleId] },
-      summary: { type: "string" },
-      architectureReferences: pathArray,
-      sourceReferences: pathArray,
-      explicitExclusions: stringArray,
-      interfaces: stringArray,
-      fields: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["name", "semantics", "producer", "storage", "consumers", "lifetime"],
-          properties: {
-            name: { type: "string" },
-            semantics: { type: "string" },
-            producer: { type: "string" },
-            storage: { type: "string" },
-            consumers: stringArray,
-            lifetime: { type: "string" },
-          },
-        },
-      },
-      events: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["name", "condition", "effects", "priority"],
-          properties: {
-            name: { type: "string" },
-            condition: { type: "string" },
-            effects: stringArray,
-            priority: { type: "string" },
-          },
-        },
-      },
-      cycleBehavior: stringArray,
-      exceptionalBehavior: stringArray,
-      invariants: stringArray,
-      sharedInterfaceChanges: stringArray,
-      affectedModules: stringArray,
-      implementation: {
-        type: "object",
-        additionalProperties: false,
-        required: ["sourcePaths", "testPaths"],
-        properties: { sourcePaths: pathArray, testPaths: pathArray },
-      },
-      acceptance: {
-        type: "object",
-        additionalProperties: false,
-        required: ["assertions", "directedTests", "commands", "expectedResults"],
-        properties: {
-          assertions: stringArray,
-          directedTests: stringArray,
-          commands: { type: "array", items: commandSpecSchema() },
-          expectedResults: stringArray,
-        },
-      },
-      risks: stringArray,
-      openQuestions: stringArray,
-    },
-  };
-}
-
-function implementationSchema(moduleId: string, designSha256: string): object {
-  return {
-    type: "object",
-    additionalProperties: false,
-    required: ["schemaVersion", "moduleId", "designSha256", "summary", "files", "notes", "designGap"],
-    properties: {
-      schemaVersion: { type: "integer", enum: [1] },
-      moduleId: { type: "string", enum: [moduleId] },
-      designSha256: { type: "string", enum: [designSha256] },
-      summary: { type: "string" },
-      files: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["path", "kind", "baseSha256", "content", "purpose"],
-          properties: {
-            path: { type: "string" },
-            kind: { type: "string", enum: ["source", "test"] },
-            baseSha256: { type: ["string", "null"] },
-            content: { type: "string" },
-            purpose: { type: "string" },
-          },
-        },
-      },
-      notes: { type: "array", items: { type: "string" } },
-      designGap: {
-        anyOf: [
-          { type: "null" },
-          {
-            type: "object",
-            additionalProperties: false,
-            required: ["reason", "counterexample"],
-            properties: { reason: { type: "string" }, counterexample: { type: "string" } },
-          },
-        ],
-      },
-    },
-  };
-}
-
-function reviewSchema(
-  moduleId: string,
-  designSha256: string,
-  implementationSha256: string,
-  kind: Stage2ReviewReport["kind"],
-): object {
-  return {
-    type: "object",
-    additionalProperties: false,
-    required: [
-      "schemaVersion", "kind", "moduleId", "designSha256", "implementationAggregateSha256",
-      "verdict", "summary", "findings", "commandResults",
-    ],
-    properties: {
-      schemaVersion: { type: "integer", enum: [1] },
-      kind: { type: "string", enum: [kind] },
-      moduleId: { type: "string", enum: [moduleId] },
-      designSha256: { type: "string", enum: [designSha256] },
-      implementationAggregateSha256: { type: "string", enum: [implementationSha256] },
-      verdict: { type: "string", enum: ["pass", "fail"] },
-      summary: { type: "string" },
-      findings: {
-        type: "array",
-        items: {
-          type: "object",
-          additionalProperties: false,
-          required: ["severity", "code", "message", "artifact", "requiredAction"],
-          properties: {
-            severity: { type: "string", enum: ["error", "warning", "note"] },
-            code: { type: "string" },
-            message: { type: "string" },
-            artifact: { type: "string" },
-            requiredAction: { type: "string" },
-          },
-        },
-      },
-      commandResults: { type: "array", items: commandResultSchema() },
-    },
-  };
-}
-
-function commandSpecSchema(): object {
-  return {
-    type: "object",
-    additionalProperties: false,
-    required: ["id", "description", "runner", "command", "args", "script", "required"],
-    properties: {
-      id: { type: "string" },
-      description: { type: "string" },
-      runner: { type: "string", enum: ["host", "wsl"] },
-      command: { type: "string" },
-      args: { type: "array", items: { type: "string" } },
-      script: { type: "string" },
-      required: { type: "boolean" },
-    },
-  };
-}
-
-function commandResultSchema(): object {
-  return {
-    type: "object",
-    additionalProperties: false,
-    required: [
-      "id", "description", "runner", "command", "required", "ok", "exitCode", "output", "checkedAt",
-    ],
-    properties: {
-      id: { type: "string" },
-      description: { type: "string" },
-      runner: { type: "string", enum: ["host", "wsl"] },
-      command: { type: "string" },
-      required: { type: "boolean" },
-      ok: { type: "boolean" },
-      exitCode: { type: ["integer", "null"] },
-      output: { type: "string" },
-      checkedAt: { type: "string" },
-    },
-  };
 }

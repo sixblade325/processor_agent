@@ -1,22 +1,22 @@
 # Stage2 Guided Implementation 计划
 
-状态：Implementation Topology Decision Loop、Unit Module Loop 与 Architecture Rework 已实现，`dual_issue_demo` 已进入首个真实 Decision
+状态：schemaVersion 3 的 Implementation Topology Decision Loop、Unit Loop 与 Architecture Rework 已实现
 
 上位文档：[PRODUCT_PLAN.md](./PRODUCT_PLAN.md)
 
-更新时间：2026-08-30
+更新时间：2026-08-31
 
 ## 1. 阶段目标
 
 Stage2 先与用户逐项闭合 Implementation Topology，再按 Implementation Unit 推进 `Design -> Implementation -> Verification`，逐步生成可构建、可验证的 baseline，并供后续 Architecture Change 复用。
 
-Stage2 的输入是 Stage1 已批准的 Architecture Snapshot，或 Stage3 创建并完成影响分析的 Architecture Change。Stage2 不自行改变 ISA、全局流水边界、模块职责和共享协议。
+Stage2 的输入是 Stage1 已批准的 Architecture Snapshot，或 Stage3 创建并完成影响分析的 Architecture Change。Stage2 不自行改变 ISA、全局流水边界、Architecture Role 和共享语义。
 
-Stage1 批准的 `architecture/modules.yaml` 提供 Architecture Module、职责、状态所有权和契约消费关系。Stage2 通过用户参与的拓扑决策循环形成 Implementation Unit、共享接口所有权、源码组织、无环实施依赖和实施 wave。Architecture Module 与 Implementation Unit 不要求一一对应。
+Stage1 批准的 `architecture/overview.md` 和机器 ProjectSpec 提供 Architecture Role、全局语义和验证完成条件。Stage2 通过用户参与的拓扑决策循环形成 Implementation Unit、Architecture Role 映射、共享接口所有权、源码组织、无环实施依赖和实施 wave。Architecture Role 与 Implementation Unit 不要求一一对应。
 
-当前 Harness 已实现 schemaVersion 2 的 Topology Decision Loop、独立 Topology Research Worker、可恢复 Planner、单 Decision Packet、option 与 custom 提交、传递失效与 reopen、`design/plan.md` 投影、结构审查和批准哈希、完整 Unit 看板、旧 Module Loop 显式迁移、批准 Plan 驱动的 Design、Implementation、Verification 循环，以及 Stage2 返回 Stage1 的 Architecture Rework。`architecture.stage2Order` 不再驱动新 Stage2 的 Unit 顺序。
+当前 Harness 已实现 schemaVersion 3 的 Topology Decision Loop、独立 Topology Research Worker、可恢复 Planner、单 Decision Packet、option 与 custom 提交、传递失效与 reopen、`design/plan.md` 投影、结构审查和批准哈希、完整 Unit 看板、旧 Module Loop 显式迁移、批准 Plan 驱动的 Design、Implementation、Verification 循环，以及 Stage2 返回 Stage1 的 Architecture Rework。Implementation Topology 只由 Stage2 拥有。
 
-`dual_issue_demo` 已初始化 schemaVersion 2 Stage2，当前处于 `TOPOLOGY_DECISION_LOOP`。`S2_TOP_001` 已完成独立调研和 Planner 候选生成，正在等待用户确认 Implementation Unit 边界。当前没有已确认 Unit、Unit Design 或 RTL。
+`dual_issue_demo` 已迁移到 schemaVersion 3。旧 schemaVersion 2 Topology 已失效并按 Architecture Role 重建，旧 Decision 只保留迁移索引，旧 Unit 边界未自动晋升。当前 Stage2 revision 8 因活动的 `S2_ARW_001` 保持 `BLOCKED`，等待 Stage1 重新审查和用户批准。
 
 2026-08-30 实现证据：
 
@@ -32,11 +32,11 @@ Stage1 批准的 `architecture/modules.yaml` 提供 Architecture Module、职责
 
 Stage2 明确区分：
 
-1. `Architecture Module`：Stage1 批准的架构职责、状态所有权和契约消费关系，允许存在反馈环。
-2. `Interface Contract`：跨模块字段、方向、时序、有效条件和唯一 owner。
+1. `Architecture Role`：Stage1 批准的稳定架构职责和全局语义参与者，不规定实现边界。
+2. `Interface Contract`：Stage2 确定的跨 Unit 字段、方向、时序、有效条件和唯一 owner。
 3. `Implementation Unit`：Stage2 的 Design、源码、测试、验证和调度单位，其实施依赖必须构成 DAG。
 
-Implementation Unit 可以映射一个或多个 Architecture Module。共享类型、协议或基础设施 Unit 可以不拥有 Architecture Module，但必须声明必要性、消费者和源码边界。每个 Architecture Module 必须有唯一 primary Implementation Unit，每个 Interface Contract 和源码路径必须有唯一 owner。
+Implementation Unit 可以映射一个或多个 Architecture Role。共享类型、协议或基础设施 Unit 可以不映射 Architecture Role，但必须声明必要性、消费者和源码边界。每个 Architecture Role 必须映射到唯一 Implementation Unit，每个 Interface Contract 和源码路径必须有唯一 owner。
 
 ### 2.2 交互流程
 
@@ -82,7 +82,7 @@ Agent 推荐不构成用户批准。用户的自然语言结论必须能够唯�
 
 默认按以下依赖推进，具体项目可以增加问题：
 
-1. Architecture Module 到 Implementation Unit 的映射及合并、拆分边界。
+1. Architecture Role 到 Implementation Unit 的映射及 Unit 合并、拆分边界。
 2. 共享 Bundle、pipeline payload、配置和工具代码的 owner。
 3. Interface Contract 的 owner、生产者、消费者和稳定边界。
 4. Scala package、源码目录、测试目录和顶层集成位置。
@@ -117,7 +117,7 @@ design/plan.md
 
 1. 所有 blocking Topology Decision 已闭合。
 2. Implementation Unit DAG 无环且所有依赖可解析。
-3. Architecture Module 映射完整，primary owner 唯一。
+3. Architecture Role 映射完整，每个 Role 的实现 owner 唯一。
 4. Interface Contract 和源码路径范围没有 owner 冲突。
 5. 每个 Unit 都有 Design、实现、测试和集成责任。
 6. 实施 wave 与验证落点明确。
@@ -145,27 +145,27 @@ Stage2 初始化、Topology Decision 提交、计划批准、模块状态转换�
 4. 建立 `design/plan.md`、Topology Decision 状态和新的 Planner 租约。
 5. Planner 可以引用旧草案中的事实和问题，所有 Unit 边界、Interface owner、路径和 DAG 都必须重新经过用户确认。
 
-存在已批准 Design、源码或验证证据时，第一版拒绝自动迁移并报告需要人工闭合的影响范围。当前 `dual_issue_demo` 从无 Stage2 状态直接初始化为 schemaVersion 2，不执行旧状态迁移。
+存在已批准 Design、源码或验证证据时，第一版拒绝自动迁移并报告需要人工闭合的影响范围。schemaVersion 2 到 3 使用顶层产品迁移命令，迁移后从 Architecture Role 重新建立 Topology Decision Loop。
 
-## 3. 单模块循环
+## 3. 单 Unit 循环
 
 ```text
-选择模块
+选择 Unit
 -> Shadow Align 闭合 Design
--> 用户批准 Design，并选择本模块的验证模式
+-> 用户批准 Design，并选择本 Unit 的验证模式
 -> Active Coding 实现
 -> Active Coding 完成主验证
 -> 按用户选择完成静态审查与验证
 -> 修复问题并重跑受影响检查
--> Harness 记录证据并关闭模块
+-> Harness 记录证据并关闭 Unit
 -> 双 Agent 满足条件后轮转
 ```
 
 每个 Unit 在 Design 批准时都必须单独向用户询问：
 
-> 本模块是否启用独立 Static Review Worker 与独立 Verification Worker？
+> 本 Unit 是否启用独立 Static Review Worker 与独立 Verification Worker？
 
-Harness 不从上一个模块继承选择，也不推断默认值。选择记录为：
+Harness 不从上一个 Unit 继承选择，也不推断默认值。选择记录为：
 
 1. `independent_workers`：启动两个短生命周期 subagent。
 2. `active_only`：不启动 subagent，由当前 Active Coding Agent 完成静态自审和验证。
@@ -265,7 +265,7 @@ Design 至少闭合：
 1. Design revision 与内容哈希。
 2. 允许修改的源码和测试路径。
 3. 验收命令、断言和预期结果。
-4. 本模块的 `verificationMode`。
+4. 本 Unit 的 `verificationMode`。
 
 批准后的 Design 对 Active Coding Agent 只读。实现发现设计缺口时，Active Coding Agent 必须提交带反例的 `DESIGN_REOPENED` 请求，不得自行增加协议、状态或保守限制。
 
@@ -357,7 +357,7 @@ Agent A: Active Coding(first ready unit)
 Agent B: Shadow Align(next ready unit)
 ```
 
-`first ready unit` 和 `next ready unit` 由已批准 Implementation DAG 与 wave 决定，不由 Architecture Module 列表位置决定。仅当依赖已经满足且写入路径互不相交时允许 Shadow Design 与 Active Implementation 并行。任一路径同一时刻只有一个写入者。
+`first ready unit` 和 `next ready unit` 由已批准 Implementation DAG 与 wave 决定，不由 Architecture Role 的展示顺序决定。仅当依赖已经满足且写入路径互不相交时允许 Shadow Design 与 Active Implementation 并行。任一路径同一时刻只有一个写入者。
 
 ## 8. 验证闭环
 
@@ -385,17 +385,17 @@ Agent B: Shadow Align(next ready unit)
 
 Unit 进入 `COMPLETE` 还要求 Design、源码、测试和证据一致，不存在当前 Unit 的必需工作，已知排除项已经记录，并明确下一个集成消费者。Harness 的阶段报告必须包含实施看板、角色、Unit、状态、批准 revision、修改文件、验证证据、共享接口变化、依赖 Unit、阻塞项和下一项允许动作。
 
-## 9. 模块映射、拓扑一致性与最小持久实体
+## 9. Role 映射、拓扑一致性与最小持久实体
 
-Stage1 批准后，Stage2 将 `architecture/modules.yaml` 视为只读 Architecture 输入。`design/plan.md` 中稳定的 Implementation Unit ID 是 Stage2 Design、源码、验证、调度和状态看板的主键。
+Stage1 批准后，Stage2 将 Stage1 ProjectSpec 中的 Architecture Role、全局语义和完成条件视为只读输入。`design/plan.md` 中稳定的 Implementation Unit ID 是 Stage2 Design、源码、验证、调度和状态看板的主键。
 
 Architecture 与 Implementation Topology 承担不同职责：
 
-1. Architecture `dependsOn` 表示契约消费关系，允许存在经过寄存边界的反馈环。
-2. Architecture `stage2Order` 只作为旧 Profile 提供的初始讨论线索，不再直接驱动 Agent 分配和模块实施。
+1. Architecture Role 表示稳定职责，不携带实现依赖、源码路径或 Chisel 层级。
+2. Global Protocol 通过 ownerRole、producerRoles、consumerRoles 和 affectedResources 描述稳定语义参与关系。
 3. Implementation Unit `dependsOn` 表示 Design 与实现前置关系，必须形成 DAG。
-4. 每个 Architecture Module 映射到唯一 primary Unit；一个 Unit 可以承载多个紧耦合 Architecture Module。
-5. foundation 或 shared contract Unit 可以不承载 Architecture Module，但必须拥有明确产物并被至少一个 Unit 消费。
+4. 每个 Architecture Role 映射到唯一 Implementation Unit；一个 Unit 可以承载多个紧耦合 Role。
+5. foundation 或 shared contract Unit 可以不承载 Architecture Role，但必须拥有明确产物并被至少一个 Unit 消费。
 6. 每个 Interface Contract 声明唯一 owner、生产者、消费者、字段边界和冻结状态。
 
 Design 与 `src/` 必须保持以下拓扑一致性：
@@ -407,7 +407,7 @@ Design 与 `src/` 必须保持以下拓扑一致性：
 5. Active Coding 只能修改当前 Unit 已批准的路径集合。路径新增、删除或 owner 迁移必须先修订 Implementation Plan，再重新批准受影响 Design。
 6. Unit 完成时，Design 声明的全部路径必须存在，源码和测试哈希必须与验证证据一致。
 
-Harness 在 Plan 批准前检查 Unit ID、Architecture 映射、Interface owner、源码范围和 DAG。Harness 在 Design 批准前检查路径位于 `src/main/` 或 `src/test/`、单份 Design 内没有路径别名或重复、不同 Unit 没有路径所有权重叠。Harness 在实现和验证阶段继续使用批准 Design 的路径集合限制写入并检查漂移。
+Harness 在 Plan 批准前检查 Unit ID、Architecture Role 唯一映射、Interface owner、源码范围和 DAG。Harness 在 Design 批准前检查路径位于 `src/main/` 或 `src/test/`、单份 Design 内没有路径别名或重复、不同 Unit 没有路径所有权重叠。Harness 在实现和验证阶段继续使用批准 Design 的路径集合限制写入并检查漂移。
 
 首个 Unit 产生内容时，最小正式实体为：
 

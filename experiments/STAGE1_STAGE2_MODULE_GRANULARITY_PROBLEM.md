@@ -1,5 +1,16 @@
 # Stage1 与 Stage2 模块粒度问题记录
 
+状态：已通过 2026-08-31 产品重构解决
+
+解决方式：
+
+1. Stage1 不再定义 Architecture Module。Stage1 只定义稳定的 Architecture Role、总体行为和全局语义。
+2. Stage2 独立定义 Implementation Unit、Interface Contract、源码路径、DAG 和 wave。
+3. Architecture Role 不等于 Chisel Module。一个 Implementation Unit 可以映射多个 Role，也可以通过 `kind=shared` 承载不映射 Role 的共享产物。
+4. 每个 Architecture Role 必须唯一映射到一个 Implementation Unit。每个源码路径和 Interface Contract 也必须有唯一 owner。
+5. Stage1 删除 Module Manifest 和 `stage2Order`。Global Protocol 使用 Role 关系，具体接口 owner 和状态存放位置由 Stage2 决定。
+6. 下文保留的是重构前故障证据和候选模型，不再描述当前产品规则。
+
 状态：问题已确认，产品重设计延期，Demo 使用临时兼容方案
 
 记录时间：2026-08-31

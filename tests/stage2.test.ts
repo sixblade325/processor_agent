@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { buildWorkspaceAgentPrompt } from "../src/agent-runtime.js";
+import { validateArchitectureRoleMapping } from "../src/stage2/topology-model.js";
 import {
   buildStage2CodexArguments,
   type Stage2AgentCall,
@@ -50,10 +51,24 @@ import type {
   Stage2ImplementationProposal,
   Stage2LegacyProjectStage,
   Stage2ReviewReport,
+  Stage1ProjectSpec,
+  Stage2ImplementationUnitPlan,
   Stage2TaskEnvelope,
   Stage2TopologyPlanPatch,
   Stage2TopologyProposal,
 } from "../src/types.js";
+
+test("One Stage1 Architecture can support different legal Stage2 Unit topologies", () => {
+  const architecture = topologyArchitectureFixture();
+  const split = [
+    topologyUnit("frontend", ["fetch"]),
+    topologyUnit("backend", ["execute"]),
+  ];
+  const merged = [topologyUnit("core", ["fetch", "execute"])];
+
+  assert.deepEqual(validateArchitectureRoleMapping(architecture, split), []);
+  assert.deepEqual(validateArchitectureRoleMapping(architecture, merged), []);
+});
 
 test("Stage2 exposes one researched Topology Decision and projects the partial Unit board", async () => {
   const fixture = await createCompletedStage1Fixture(["regfile", "fetch"]);
@@ -71,7 +86,7 @@ test("Stage2 exposes one researched Topology Decision and projects the partial U
   const projectedPlan = await readFile(join(fixture.project, "design", "plan.md"), "utf8");
   assert.match(projectedPlan, /S2_TOP_001/u);
   assert.match(projectedPlan, /### Option `recommended`（推荐）/u);
-  assert.match(projectedPlan, /\| `regfile` \| architecture \| regfile \|/u);
+  assert.match(projectedPlan, /\| `regfile` \| implementation \| regfile \|/u);
 
   await answerTopologyDecision(fixture.project, "S2_TOP_001", "recommended");
   loaded = await loadStage2(fixture.project);
@@ -228,8 +243,13 @@ test("Stage2 blocks a required Topology Decision when Research evidence is insuf
 test("Stage2 explicitly migrates an artifact-free legacy Module Loop", async () => {
   const fixture = await createCompletedStage1Fixture(["regfile"]);
   const loaded = await loadStage1(fixture.project);
-  const architecture = loaded.state.stage1.projectSpec?.architecture.modules[0];
-  assert.ok(architecture !== undefined);
+  const architecture = {
+    id: "regfile",
+    responsibility: "Implement regfile.",
+    stateOwnership: ["regfile_state"],
+    dependsOn: [] as string[],
+    interfaces: ["regfile_interface"],
+  };
   const legacy: Stage2LegacyProjectStage = {
     schemaVersion: 1,
     status: "MODULE_LOOP",
@@ -259,7 +279,7 @@ test("Stage2 explicitly migrates an artifact-free legacy Module Loop", async () 
   await saveProjectState(loaded.root, loaded.state);
 
   const migrated = await migrateLegacyStage2(fixture.project);
-  assert.equal(migrated.state.stage2.schemaVersion, 2);
+  assert.equal(migrated.state.stage2.schemaVersion, 3);
   assert.equal(migrated.state.stage2.status, "TOPOLOGY_DISCOVERY");
   assert.equal(migrated.state.stage2.topology.migration?.sourceRevision, 7);
   assert.equal(migrated.state.stage2.agents.A.role, "planner");
@@ -983,12 +1003,7 @@ async function createCompletedStage1Fixture(
 
 function stage2FixtureProfile(moduleOrder: string[]): string {
   const owner = moduleOrder[0] ?? "regfile";
-  const modules = moduleOrder.map((id) => `    - id: ${id}
-      responsibility: Implement ${id}.
-      stateOwnership: [${id}_state]
-      dependsOn: []
-      interfaces: [${id}_interface]`).join("\n");
-  return `schemaVersion: 1
+  return `schemaVersion: 2
 id: stage2_fixture
 version: 1.0.0
 displayName: Stage2 Fixture
@@ -1017,6 +1032,8 @@ decisions:
         summary: Use fixture architecture.
         consequences: [Stage2 may start.]
 architecture:
+  roles:
+${moduleOrder.map((id) => `    - id: ${id}\n      responsibility: Implement ${id} behavior.`).join("\n")}
   systemBoundary: [Fixture boundary]
   supportedInstructions: [Fixture instruction]
   invariants: [In order]
@@ -1029,15 +1046,15 @@ architecture:
       validUntil: output
   globalProtocols:
     - id: fixture_protocol
-      owner: ${owner}
+      ownerRole: ${owner}
+      producerRoles: [${moduleOrder.join(", ")}]
+      consumerRoles: [${moduleOrder.join(", ")}]
+      affectedResources: []
       rules: [Fixture rule]
   counterRules:
     - name: cycles
       increment: Every cycle.
       exclusions: [reset]
-  modules:
-${modules}
-  stage2Order: [${moduleOrder.join(", ")}]
 verification:
   referenceModel: Fixture model.
   layers: [unit]
@@ -1046,6 +1063,7 @@ verification:
   decisionAcceptance:
     - decisionId: D1
       criteria: [Fixture architecture remains unchanged.]
+  completionCriteria: [All fixture units pass.]
 scaffold:
   files:
     - path: build.fixture
@@ -1053,6 +1071,57 @@ scaffold:
         fixture
   smokeChecks: []
 `;
+}
+
+function topologyArchitectureFixture(): Stage1ProjectSpec {
+  return {
+    intent: {
+      goal: "Test topology freedom.",
+      useCase: "Automated verification.",
+      constraints: [],
+      exclusions: [],
+    },
+    architecture: {
+      roles: [
+        { id: "fetch", responsibility: "Provide instruction delivery semantics." },
+        { id: "execute", responsibility: "Provide execution and retirement semantics." },
+      ],
+      systemBoundary: [],
+      supportedInstructions: [],
+      invariants: [],
+      sharedFields: [],
+      globalProtocols: [],
+      counterRules: [],
+    },
+    verification: {
+      referenceModel: "Fixture model.",
+      layers: [],
+      requiredScenarios: [],
+      counters: [],
+      decisionAcceptance: [],
+      completionCriteria: [],
+    },
+  };
+}
+
+function topologyUnit(id: string, architectureRoles: string[]): Stage2ImplementationUnitPlan {
+  return {
+    id,
+    kind: "implementation",
+    architectureRoles,
+    responsibility: `Implement ${architectureRoles.join(" and ")}.`,
+    rationale: "Fixture topology.",
+    packageName: "demo",
+    designPath: `design/${id}.md`,
+    sourcePaths: [],
+    testPaths: [],
+    integrationPaths: [],
+    dependsOn: [],
+    wave: 0,
+    integrationConsumers: [],
+    completionCriteria: [],
+    verificationResponsibility: "Fixture verification.",
+  };
 }
 
 function fixtureExecutor(calls: string[]): Stage2AgentExecutor {
@@ -1071,16 +1140,16 @@ function fixtureExecutor(calls: string[]): Stage2AgentExecutor {
           sources: [
             {
               kind: "project",
-              locator: "architecture/modules.yaml",
+              locator: "architecture/overview.md",
               revision: "fixture",
               accessedAt: "2026-08-30T00:00:00.000Z",
-              locations: ["architecture/modules.yaml:1"],
+              locations: ["architecture/overview.md:1"],
             },
           ],
           facts: [
             {
               claim: `已读取 ${decisionId} 需要的项目架构事实。`,
-              source: "architecture/modules.yaml",
+              source: "architecture/overview.md",
               confidence: "high",
             },
           ],
@@ -1197,11 +1266,11 @@ function fixtureTopologyProposal(envelope: Stage2TaskEnvelope): Stage2TopologyPr
     case "unit_mapping":
       patch = {
         kind: "unit_mapping",
-        units: topology.architectureModules.map((module) => ({
-          id: module.id,
-          kind: "architecture",
-          architectureModules: [module.id],
-          responsibility: module.responsibility,
+        units: topology.architectureRoles.map((role) => ({
+          id: role.id,
+          kind: "implementation",
+          architectureRoles: [role.id],
+          responsibility: role.responsibility,
           rationale: "Fixture 使用一对一 Unit 映射。",
         })),
       };
@@ -1279,7 +1348,7 @@ function fixtureTopologyProposal(envelope: Stage2TaskEnvelope): Stage2TopologyPr
     decisionId: topology.decision.id,
     kind: topology.decision.kind,
     summary: `Fixture ${topology.decision.id} 候选。`,
-    architectureFacts: ["使用已批准 Architecture Module Manifest。"],
+    architectureFacts: ["使用已批准的 Stage1 Architecture Role。"],
     sourceEvidence: topology.evidence?.facts.map((fact) => fact.claim) ?? [],
     unknowns: [],
     options: [option, { ...structuredClone(option), id: "alternative", label: "Fixture 备选" }],
@@ -1292,7 +1361,7 @@ function fixtureTopologyProposal(envelope: Stage2TaskEnvelope): Stage2TopologyPr
 }
 
 function taskEnvelopeFromCall(call: Stage2AgentCall): Stage2TaskEnvelope {
-  const match = /Task Envelope：\r?\n([\s\S]*?)\r?\n\r?\n(?:Stage1 Architecture|Architecture Module|Approved Design|Module State)/u.exec(call.prompt);
+  const match = /Task Envelope：\r?\n([\s\S]*?)\r?\n\r?\n(?:Stage1 Architecture|Unit Architecture Context|Approved Design|Module State)/u.exec(call.prompt);
   if (match?.[1] === undefined) {
     throw new Error(`No Task Envelope in ${call.task} prompt`);
   }
@@ -1307,7 +1376,6 @@ function designProposal(moduleId: string): Stage2DesignProposal {
     summary: `${moduleId} 的闭合模块设计。`,
     architectureReferences: [
       "architecture/overview.md",
-      "architecture/modules.yaml",
       "verification/plan.md",
     ],
     sourceReferences: [],
