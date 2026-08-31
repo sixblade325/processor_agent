@@ -4,11 +4,15 @@ import type {
   CommandSpec,
   Stage1ProjectState,
   Stage2DesignProposal,
+  Stage2DesignRevisionIssue,
   Stage2ModuleState,
   Stage2ReviewReport,
   Stage2TaskEnvelope,
   Stage2TopologyDecisionKind,
   Stage2TopologyDecisionSpec,
+  Stage2PackageDesignProposal,
+  Stage2PackageReviewReport,
+  Stage2WorkspaceTaskEnvelope,
 } from "../types.js";
 
 const PROJECT_READER_INSTRUCTION = `项目文件的枚举、搜索和读取必须使用 processor_project MCP 的 list_files、search_text 和 read_file。不得依赖 Shell、PowerShell、cmd 或交互会话 execpolicy 读取项目证据。`;
@@ -607,20 +611,590 @@ export function reviewSchema(
   };
 }
 
-function commandSpecSchema(): object {
+export function buildSystemDesignDraftPrompt(
+  envelope: Stage2WorkspaceTaskEnvelope,
+  state: Stage1ProjectState,
+  instruction: string | undefined,
+  skillContext: string,
+): string {
+  return `你是 Stage2 System Design Agent A。读取当前已批准 Architecture、项目规则、已有源码骨架和验证材料，形成一份整核 System Design Draft。只输出结构化提案，不修改项目文件，不替用户批准。
+
+${PROJECT_READER_INSTRUCTION}
+
+System Design 必须完成以下内容：
+1. 使用可选 parentId 表达 Design Component 的唯一设计归属层次。parentId 不表达 Chisel 实例化、数据依赖或 Work Package 归属。
+2. 每个 Architecture Role 至少映射到一个 Component，每个 Component 只属于一个 Work Package。
+3. Interface 只闭合跨 Component 的 owner、生产者、消费者、字段骨架和时序边界。Package 内部精确信号留给 Package Design。
+4. Work Package 是 Agent 的 Design、实现、路径权限和验证单位。allowedSourcePaths 与 allowedTestPaths 必须逐项填写精确项目相对文件路径，禁止目录和通配符。源码与测试路径必须有唯一 owner。designDependsOn、implementationDependsOn 与 integrationDependsOn 分别表达 Design、源码实施和集成验证依赖，三组依赖都必须无环。
+5. decisionRequests 只允许用于改变 Architecture Role、流水寄存边界、全局跨周期状态、identity/replay、stall/flush/kill/serialization 范围、跨 Package Interface、重大工程取舍或 Stage1 Rework 的问题。命名、helper、普通 Bundle 组织和局部代码布局不得打断用户。
+6. 旧 S2_TOP 结论和旧 Unit 只作为候选证据。重新划分 Component 与 Work Package，不能继承旧批准。
+7. 缺少待设计的 Bundle、源码或测试不构成 Research blocker。基于 Architecture 先闭合可实现设计。
+
+顶层 Component 的 parentId 使用 null，子 Component 使用父 Component id。architectureReferences 只能填写实际存在的项目相对文件路径，不附加注释、哈希或描述。所有 id 使用 lower_snake_case。自然语言使用简体中文。最终只输出符合 Schema 的 JSON。
+
+Skill Context：
+${skillContext}
+
+Task Envelope：
+${JSON.stringify(envelope, null, 2)}
+
+Stage1 ProjectSpec：
+${JSON.stringify(state.stage1.projectSpec ?? {}, null, 2)}
+
+本轮用户修订指令：
+${instruction?.trim() || "首次生成，无附加指令。"}
+`;
+}
+
+export function buildSystemDesignReviewPrompt(
+  envelope: Stage2WorkspaceTaskEnvelope,
+  designSha256: string,
+  skillContext: string,
+): string {
+  return `你是 Stage2 System Design Agent B，执行只读独立审查。检查 Architecture Fidelity、Component 层次、状态 owner、跨 Package Interface、路径唯一 owner、实施依赖、验证覆盖和用户决策遗漏。Task Envelope 存在 revisionRequest 时，必须逐项检查当前 Proposal 是否落实该用户修订要求，遗漏或冲突必须形成 error finding。不得修改文件，不得直接重写方案，不得替用户批准。
+
+${PROJECT_READER_INSTRUCTION}
+
+审查对象是磁盘中当前未批准的 design/plan.md，哈希为 ${designSha256}。Task Envelope 中的 proposal 与该文件是同一冻结草案。error finding 必须给出具体缺口、涉及产物和恢复动作。legacyEvidence 只提供历史候选和问题索引，不具有当前 approval 权威，不能仅因新草案偏离旧 S2_TOP、旧 Unit 或旧 Plan 而报告 error。草案必须在每个开放 DecisionRequest 的 recommendation 下内部一致；备选项可能改变 Component、Interface 或 Work Package，由用户回答后触发新草案。不得仅因存在这种备选项报告 error。新增 decisionRequests 只允许覆盖高风险用户决策类别。可由 Agent 在 Package Design 中闭合的问题写 finding，不生成用户 DecisionRequest。最终只输出符合 Schema 的 JSON。
+
+Skill Context：
+${skillContext}
+
+Task Envelope：
+${JSON.stringify(envelope, null, 2)}
+`;
+}
+
+export function buildPackageDesignPrompt(
+  envelope: Stage2WorkspaceTaskEnvelope,
+  instruction: string | undefined,
+  skillContext: string,
+): string {
+  const workPackage = envelope.workPackage?.plan;
+  if (workPackage === undefined) {
+    throw new Error("Package Design Task Envelope is missing a Work Package");
+  }
+  return `你是 Stage2 Shadow Agent。只闭合 Work Package ${workPackage.id} 的 Package Design，不修改文件，不实现 RTL，不改变已批准 System Design。
+
+${PROJECT_READER_INSTRUCTION}
+
+读取 AGENTS.md、Architecture、System Design、批准的上游 Package Design、相关源码和测试。闭合接口字段、生产者、寄存边界、消费者、状态生命周期、同拍优先级、stall、flush、redirect、kill、retry、late response、reset、复用、不变量、组合路径、断言、定向测试和可执行命令。
+
+implementation 路径必须完整等于 Work Package 已批准路径。architectureReferences 和 sourceReferences 只能包含实际存在的项目相对路径。decisionRequests 只用于高风险用户决策；局部实现选择由你写入 Design。存在普通待设计问题时继续闭合，无法闭合的正确性缺口进入 openQuestions。自然语言使用简体中文，最终只输出符合 Schema 的 JSON。
+
+Skill Context：
+${skillContext}
+
+Task Envelope：
+${JSON.stringify(envelope, null, 2)}
+
+本轮用户修订指令：
+${instruction?.trim() || "首次闭合，无附加指令。"}
+`;
+}
+
+export function buildPackageDesignPatchPrompt(
+  envelope: Stage2WorkspaceTaskEnvelope,
+  proposal: Stage2PackageDesignProposal,
+  issues: Stage2DesignRevisionIssue[],
+  baseProposalSha256: string,
+  instruction: string | undefined,
+  skillContext: string,
+): string {
+  return `你是 Stage2 Shadow Agent 的局部修订任务。只修复 issues 指定字段，返回 RFC 6902 风格的有限 Patch，不重写完整 Package Design，不修改项目文件，不改变已批准 System Design。
+
+${PROJECT_READER_INSTRUCTION}
+
+每个 operation.target 必须严格等于 issues 中 repairClass=local_patch 的 target。baseProposalSha256 必须原样返回。remove 操作的 value 使用 null。修订后应消除对应问题，保留未涉及字段。无法在允许字段内闭合时返回空 operations，由 Harness 保持原草案。自然语言使用简体中文，最终只输出符合 Schema 的 JSON。
+
+Skill Context：
+${skillContext}
+
+Task Envelope：
+${JSON.stringify(envelope, null, 2)}
+
+Base Proposal SHA-256：${baseProposalSha256}
+
+Issues：
+${JSON.stringify(issues, null, 2)}
+
+Base Proposal：
+${JSON.stringify(proposal, null, 2)}
+
+本轮用户修订指令：
+${instruction?.trim() || "按结构化 issues 局部闭合。"}
+`;
+}
+
+export function buildPackageImplementationPrompt(
+  envelope: Stage2WorkspaceTaskEnvelope,
+  design: Stage2PackageDesignProposal,
+  skillContext: string,
+): string {
+  return `你是 Stage2 Active Agent。已批准的 System Design 和 Package Design 对你只读。读取项目证据后形成最小 Chisel 实现提案。
+
+${PROJECT_READER_INSTRUCTION}
+
+你没有项目写权限。files 必须给出允许路径中文件的完整内容。已有文件的 baseSha256 使用当前内容 SHA-256，新文件使用 null。不得返回允许范围外的路径，不得修改 Architecture、Design 或 .assistant。发现 Design 缺口时 files 必须为空，并填写 designGap 的原因和具体反例。不得自行增加协议、状态、流水级、tag、generation 或扩大串行化。自然语言使用简体中文，最终只输出符合 Schema 的 JSON。
+
+Skill Context：
+${skillContext}
+
+Task Envelope：
+${JSON.stringify(envelope, null, 2)}
+
+Approved Package Design：
+${JSON.stringify(design, null, 2)}
+`;
+}
+
+export function buildPackageStaticReviewPrompt(
+  envelope: Stage2WorkspaceTaskEnvelope,
+  design: Stage2PackageDesignProposal,
+  implementationSha256: string,
+  skillContext: string,
+): string {
+  return `你是短生命周期 Static Review Worker。使用冻结版本执行只读 Architecture Fidelity 与 Design 实现一致性审查，不运行命令，不修改任何文件，不读取另一个 Verification Worker 的输出。
+
+${PROJECT_READER_INSTRUCTION}
+
+Task Envelope 的 readManifest.entryFiles 和 readManifest.allowedRoots 是完整审查范围。项目根目录枚举被有意禁止，不构成审查缺口。使用精确入口文件和获准目录检查当前 Package，不要求扩大到其他 Work Package。
+
+检查接口、字段、状态生命周期、同拍优先级、禁止行为、路径权限、无关 diff、断言和测试遗漏。实现聚合哈希为 ${implementationSha256}。最终只输出符合 Schema 的 JSON。
+
+Skill Context：
+${skillContext}
+
+Task Envelope：
+${JSON.stringify(envelope, null, 2)}
+
+Approved Package Design：
+${JSON.stringify(design, null, 2)}
+`;
+}
+
+export function buildPackageVerificationPrompt(
+  envelope: Stage2WorkspaceTaskEnvelope,
+  design: Stage2PackageDesignProposal,
+  verificationWorkspace: string,
+  commandResults: CommandResult[],
+  skillContext: string,
+): string {
+  return `你是短生命周期 Verification Worker。冻结副本位于 ${verificationWorkspace}。批准命令已经由 Harness 在该冻结副本中执行。你只读审查源码、测试和 Harness Command Evidence，不调用 Shell，不修改任何文件，不读取 Static Review Worker 输出。
+
+Task Envelope 的 readManifest.entryFiles 和 readManifest.allowedRoots 是完整审查范围。项目根目录枚举被有意禁止，不构成验证缺口。使用精确入口文件和获准目录检查当前 Package，不要求扩大到其他 Work Package。
+
+commandResults 必须逐项原样回传 Harness Command Evidence，保留 id、description、runner、command、required、ok、exitCode、output 和 checkedAt。不得省略、改写或追加命令。结合批准的 Package Design 判断命令覆盖、失败含义和验证缺口。最终只输出符合 Schema 的 JSON。
+
+Harness Command Evidence：
+${JSON.stringify(commandResults, null, 2)}
+
+Skill Context：
+${skillContext}
+
+Task Envelope：
+${JSON.stringify(envelope, null, 2)}
+
+Approved Package Design：
+${JSON.stringify(design, null, 2)}
+`;
+}
+
+export function systemDesignSchema(): object {
   return {
     type: "object",
     additionalProperties: false,
-    required: ["id", "description", "runner", "command", "args", "script", "required"],
+    required: [
+      "schemaVersion", "summary", "architectureReferences", "components", "interfaces",
+      "workPackages", "globalInvariants", "acceptancePlan", "decisionRequests", "risks",
+    ],
     properties: {
-      id: { type: "string" },
-      description: { type: "string" },
-      runner: { type: "string", enum: ["host", "wsl"] },
-      command: { type: "string" },
-      args: { type: "array", items: { type: "string" } },
-      script: { type: "string" },
-      required: { type: "boolean" },
+      schemaVersion: { type: "integer", enum: [1] },
+      summary: { type: "string" },
+      architectureReferences: projectPathArraySchema(),
+      components: {
+        type: "array",
+        minItems: 1,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "id", "parentId", "architectureRoles", "responsibility", "stateOwnership", "interfaceIds",
+          ],
+          properties: {
+            id: lowerSnakeIdSchema(),
+            parentId: {
+              anyOf: [lowerSnakeIdSchema(), { type: "null" }],
+            },
+            architectureRoles: stringArraySchema(),
+            responsibility: { type: "string" },
+            stateOwnership: stringArraySchema(),
+            interfaceIds: stringArraySchema(),
+          },
+        },
+      },
+      interfaces: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "id", "ownerComponentId", "producerComponentIds", "consumerComponentIds",
+            "fields", "boundary", "timing",
+          ],
+          properties: {
+            id: lowerSnakeIdSchema(),
+            ownerComponentId: lowerSnakeIdSchema(),
+            producerComponentIds: stringArraySchema(),
+            consumerComponentIds: stringArraySchema(),
+            fields: stringArraySchema(),
+            boundary: { type: "string" },
+            timing: { type: "string" },
+          },
+        },
+      },
+      workPackages: {
+        type: "array",
+        minItems: 1,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "id", "componentIds", "designDependsOn", "implementationDependsOn",
+            "integrationDependsOn", "allowedSourcePaths", "allowedTestPaths", "designPath",
+            "acceptance",
+          ],
+          properties: {
+            id: lowerSnakeIdSchema(),
+            componentIds: stringArraySchema(),
+            designDependsOn: stringArraySchema(),
+            implementationDependsOn: stringArraySchema(),
+            integrationDependsOn: stringArraySchema(),
+            allowedSourcePaths: projectPathArraySchema(),
+            allowedTestPaths: projectPathArraySchema(),
+            designPath: { type: "string" },
+            acceptance: stringArraySchema(),
+          },
+        },
+      },
+      globalInvariants: stringArraySchema(),
+      acceptancePlan: stringArraySchema(),
+      decisionRequests: { type: "array", items: decisionRequestSchema() },
+      risks: stringArraySchema(),
     },
+  };
+}
+
+export function systemDesignReviewSchema(designSha256: string): object {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "schemaVersion", "systemDesignSha256", "verdict", "summary", "findings", "decisionRequests",
+    ],
+    properties: {
+      schemaVersion: { type: "integer", enum: [1] },
+      systemDesignSha256: { type: "string", enum: [designSha256] },
+      verdict: { type: "string", enum: ["pass", "fail"] },
+      summary: { type: "string" },
+      findings: findingArraySchema(),
+      decisionRequests: { type: "array", items: decisionRequestSchema() },
+    },
+  };
+}
+
+export function packageDesignSchema(workPackageId: string): object {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "schemaVersion", "workPackageId", "componentIds", "summary", "architectureReferences",
+      "sourceReferences", "explicitExclusions", "interfaces", "fields", "events", "cycleBehavior",
+      "exceptionalBehavior", "invariants", "sharedInterfaceChanges", "affectedWorkPackages",
+      "implementation", "acceptance", "decisionRequests", "risks", "openQuestions",
+    ],
+    properties: {
+      schemaVersion: { type: "integer", enum: [1] },
+      workPackageId: { type: "string", enum: [workPackageId] },
+      componentIds: stringArraySchema(),
+      summary: { type: "string" },
+      architectureReferences: projectPathArraySchema(),
+      sourceReferences: projectPathArraySchema(),
+      explicitExclusions: stringArraySchema(),
+      interfaces: stringArraySchema(),
+      fields: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["name", "semantics", "producer", "storage", "consumers", "lifetime"],
+          properties: {
+            name: { type: "string" },
+            semantics: { type: "string" },
+            producer: { type: "string" },
+            storage: { type: "string" },
+            consumers: stringArraySchema(),
+            lifetime: { type: "string" },
+          },
+        },
+      },
+      events: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["name", "condition", "effects", "priority"],
+          properties: {
+            name: { type: "string" },
+            condition: { type: "string" },
+            effects: stringArraySchema(),
+            priority: { type: "string" },
+          },
+        },
+      },
+      cycleBehavior: stringArraySchema(),
+      exceptionalBehavior: stringArraySchema(),
+      invariants: stringArraySchema(),
+      sharedInterfaceChanges: stringArraySchema(),
+      affectedWorkPackages: stringArraySchema(),
+      implementation: {
+        type: "object",
+        additionalProperties: false,
+        required: ["sourcePaths", "testPaths"],
+        properties: {
+          sourcePaths: projectPathArraySchema(),
+          testPaths: projectPathArraySchema(),
+        },
+      },
+      acceptance: {
+        type: "object",
+        additionalProperties: false,
+        required: ["assertions", "directedTests", "commands", "expectedResults"],
+        properties: {
+          assertions: stringArraySchema(),
+          directedTests: stringArraySchema(),
+          commands: { type: "array", items: commandSpecSchema() },
+          expectedResults: stringArraySchema(),
+        },
+      },
+      decisionRequests: { type: "array", items: decisionRequestSchema() },
+      risks: stringArraySchema(),
+      openQuestions: stringArraySchema(),
+    },
+  };
+}
+
+export function packageDesignPatchSchema(
+  baseProposalSha256: string,
+  allowedTargets: string[],
+): object {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["baseProposalSha256", "operations"],
+    properties: {
+      baseProposalSha256: { type: "string", enum: [baseProposalSha256] },
+      operations: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["op", "target", "value"],
+          properties: {
+            op: { type: "string", enum: ["add", "replace", "remove"] },
+            target: { type: "string", enum: allowedTargets },
+            value: {
+              anyOf: [
+                { type: "null" },
+                { type: "array", items: { type: "string" } },
+              ],
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+export function packageImplementationSchema(workPackageId: string, designSha256: string): object {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "schemaVersion", "workPackageId", "designSha256", "summary", "files", "notes", "designGap",
+    ],
+    properties: {
+      schemaVersion: { type: "integer", enum: [1] },
+      workPackageId: { type: "string", enum: [workPackageId] },
+      designSha256: { type: "string", enum: [designSha256] },
+      summary: { type: "string" },
+      files: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["path", "kind", "baseSha256", "content", "purpose"],
+          properties: {
+            path: { type: "string" },
+            kind: { type: "string", enum: ["source", "test"] },
+            baseSha256: { type: ["string", "null"] },
+            content: { type: "string" },
+            purpose: { type: "string" },
+          },
+        },
+      },
+      notes: stringArraySchema(),
+      designGap: {
+        anyOf: [
+          { type: "null" },
+          {
+            type: "object",
+            additionalProperties: false,
+            required: ["reason", "counterexample"],
+            properties: { reason: { type: "string" }, counterexample: { type: "string" } },
+          },
+        ],
+      },
+    },
+  };
+}
+
+export function packageReviewSchema(
+  workPackageId: string,
+  designSha256: string,
+  implementationSha256: string,
+  kind: Stage2PackageReviewReport["kind"],
+): object {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "schemaVersion", "kind", "workPackageId", "designSha256",
+      "implementationAggregateSha256", "verdict", "summary", "findings", "commandResults",
+    ],
+    properties: {
+      schemaVersion: { type: "integer", enum: [1] },
+      kind: { type: "string", enum: [kind] },
+      workPackageId: { type: "string", enum: [workPackageId] },
+      designSha256: { type: "string", enum: [designSha256] },
+      implementationAggregateSha256: { type: "string", enum: [implementationSha256] },
+      verdict: { type: "string", enum: ["pass", "fail"] },
+      summary: { type: "string" },
+      findings: findingArraySchema(),
+      commandResults: { type: "array", items: commandResultSchema() },
+    },
+  };
+}
+
+function decisionRequestSchema(): object {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "id", "category", "question", "whyUserDecisionIsRequired", "options", "recommendation",
+      "affectedComponents", "affectedInterfaces", "affectedPaths", "consequences",
+    ],
+    properties: {
+      id: lowerSnakeIdSchema(),
+      category: {
+        type: "string",
+        enum: [
+          "architecture_role", "pipeline_boundary", "global_state", "identity_or_replay",
+          "control_scope", "cross_package_interface", "engineering_tradeoff", "stage1_rework",
+        ],
+      },
+      question: { type: "string" },
+      whyUserDecisionIsRequired: { type: "string" },
+      options: {
+        type: "array",
+        minItems: 2,
+        maxItems: 3,
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["id", "label", "summary", "consequences"],
+          properties: {
+            id: lowerSnakeIdSchema(),
+            label: { type: "string" },
+            summary: { type: "string" },
+            consequences: stringArraySchema(),
+          },
+        },
+      },
+      recommendation: lowerSnakeIdSchema(),
+      affectedComponents: stringArraySchema(),
+      affectedInterfaces: stringArraySchema(),
+      affectedPaths: stringArraySchema(),
+      consequences: stringArraySchema(),
+    },
+  };
+}
+
+function findingArraySchema(): object {
+  return {
+    type: "array",
+    items: {
+      type: "object",
+      additionalProperties: false,
+      required: ["severity", "code", "message", "artifact", "requiredAction"],
+      properties: {
+        severity: { type: "string", enum: ["error", "warning", "note"] },
+        code: { type: "string" },
+        message: { type: "string" },
+        artifact: { type: "string" },
+        requiredAction: { type: "string" },
+      },
+    },
+  };
+}
+
+function stringArraySchema(): object {
+  return { type: "array", items: { type: "string" } };
+}
+
+function projectPathArraySchema(): object {
+  return {
+    type: "array",
+    items: {
+      type: "string",
+      pattern: "^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
+    },
+  };
+}
+
+function lowerSnakeIdSchema(): object {
+  return { type: "string", pattern: "^[a-z][a-z0-9_]*$" };
+}
+
+function commandSpecSchema(): object {
+  return {
+    anyOf: [
+      {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "description", "runner", "command", "args", "required"],
+        properties: {
+          id: { type: "string" },
+          description: { type: "string" },
+          runner: { type: "string", enum: ["host"] },
+          command: { type: "string" },
+          args: { type: "array", items: { type: "string" } },
+          required: { type: "boolean" },
+        },
+      },
+      {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "description", "runner", "script", "required"],
+        properties: {
+          id: { type: "string" },
+          description: { type: "string" },
+          runner: { type: "string", enum: ["wsl"] },
+          script: { type: "string" },
+          required: { type: "boolean" },
+        },
+      },
+    ],
   };
 }
 

@@ -1,477 +1,345 @@
-# Stage2 Guided Implementation 计划
+# Stage2 Skill-Driven Dual-Agent Harness 计划
 
-状态：schemaVersion 3 的 Implementation Topology Decision Loop、Unit Loop 与 Architecture Rework 已实现
+状态：schemaVersion 5 已实现，支持有界读取、局部修订、可观测 Runtime 和真实 Active/Shadow 并发
 
 上位文档：[PRODUCT_PLAN.md](./PRODUCT_PLAN.md)
 
 更新时间：2026-08-31
 
-## 1. 阶段目标
+## 1. 阶段定位
 
-Stage2 先与用户逐项闭合 Implementation Topology，再按 Implementation Unit 推进 `Design -> Implementation -> Verification`，逐步生成可构建、可验证的 baseline，并供后续 Architecture Change 复用。
+Stage2 把 Stage1 已批准的处理器总体架构转化为可实现、可验证的 baseline。
 
-Stage2 的输入是 Stage1 已批准的 Architecture Snapshot，或 Stage3 创建并完成影响分析的 Architecture Change。Stage2 不自行改变 ISA、全局流水边界、Architecture Role 和共享语义。
+Stage1 决定目标、总体特性、Architecture Role 和全局语义。Stage2 决定实现组件、共享接口、源码边界、实施依赖、逐包 Design、RTL、测试和验证证据。
 
-Stage1 批准的 `architecture/overview.md` 和机器 ProjectSpec 提供 Architecture Role、全局语义和验证完成条件。Stage2 通过用户参与的拓扑决策循环形成 Implementation Unit、Architecture Role 映射、共享接口所有权、源码组织、无环实施依赖和实施 wave。Architecture Role 与 Implementation Unit 不要求一一对应。
+Stage2 不修改 Stage1 Architecture。实现过程中发现 Architecture 错误时，必须通过 Architecture Rework 返回 Stage1，取得新的 Architecture approval 后再恢复 Stage2。
 
-当前 Harness 已实现 schemaVersion 3 的 Topology Decision Loop、独立 Topology Research Worker、可恢复 Planner、单 Decision Packet、option 与 custom 提交、传递失效与 reopen、`design/plan.md` 投影、结构审查和批准哈希、完整 Unit 看板、旧 Module Loop 显式迁移、批准 Plan 驱动的 Design、Implementation、Verification 循环，以及 Stage2 返回 Stage1 的 Architecture Rework。Implementation Topology 只由 Stage2 拥有。
+## 2. 核心模型
 
-`dual_issue_demo` 已迁移到 schemaVersion 3。旧 schemaVersion 2 Topology 已失效并按 Architecture Role 重建，旧 Decision 只保留迁移索引，旧 Unit 边界未自动晋升。当前 Stage2 revision 8 因活动的 `S2_ARW_001` 保持 `BLOCKED`，等待 Stage1 重新审查和用户批准。
+Stage2 使用两个设计层级。
 
-2026-08-30 实现证据：
+### 2.1 System Design
 
-1. `npm test` 覆盖 Stage1 与 Stage2 共 55 项测试。Stage2 覆盖单 Topology Decision、Research 证据门禁与显式刷新、用户调研关注点隔离、Planner 禁止代替用户确认、候选结构化投影、部分 Unit 看板、传递 reopen、DAG 成环拒绝、旧状态显式迁移、Decision 与 ProjectSpec 两类 Architecture Rework、Stage1 新批准门禁、Unit 传递失效和无关 Unit 证据保留，并保留 regfile tracer、角色轮转、两种验证模式、Design 漂移、路径唯一归属、越权路径、验证副本篡改、并发过期结果和 Project Reader MCP 测试。
-2. `dual_issue_demo` 的 `S2_TOP_001` 独立 Research Worker 运行 ID 为 `2026-08-30T13-28-04-579Z-1e843d23-cd18-44e4-80b2-a0cc2c6b461d`，线程为 `01a052db-1639-71f2-b802-1a5315374528`，记录 9 个来源和 19 条事实，`evidenceSufficient=true`。
-3. 同一 Decision 的可恢复 Planner 首次运行 ID 为 `2026-08-30T13-30-09-816Z-6a3b5756-0899-4b1c-91a2-ddb3a231514e`，当前候选完整投影运行 ID 为 `2026-08-30T13-37-05-549Z-0ef7566e-b0b8-4532-ab7f-77333c679c35`，两次使用同一线程 `01a052dc-feb7-77d2-bf4a-5913d52e8065`。它形成一一映射、合并 `core/control`、按闭环域合并三个候选，Harness 未自动提交推荐。
-4. schemaVersion 1 的真实 Shadow Design 两次运行保留为迁移前实验索引，不能作为当前 Plan 或 Unit Design 的批准依据。运行 ID 分别为 `2026-08-30T10-16-53-653Z-4dd4ad27-cf7e-477e-aba8-00cb965de2ca` 和 `2026-08-30T10-25-02-981Z-f333a402-0ee3-440c-9381-fa14d931eea2`。
-5. 真实 Chisel 实现与 WSL 验证等待全部 Topology Decision 闭合和用户批准 Plan，现阶段不声明已生成 baseline RTL。
+`design/plan.md` 是用户批准的全局实现设计，至少包含：
 
-## 2. 实现拓扑决策循环
+1. `Design Component` 及可选 `parentId` 层级。
+2. 每个 Component 承担的 Architecture Role、职责和状态所有权。
+3. 跨 Component 的 Interface Skeleton，包括唯一 owner、生产者、消费者、字段、边界和时序。
+4. `Work Package` 划分、Design、Implementation、Integration 三类依赖 DAG、源码路径、测试路径、Design 路径和验收条件。
+5. 全局 invariant、baseline 验收计划、风险和仍需用户拍板的 `DecisionRequest`。
 
-### 2.1 三类实体
+Architecture Role 必须全部映射。Component、源码路径和测试路径必须有唯一 Work Package owner。三类 Work Package 依赖分别执行无环校验。
 
-Stage2 明确区分：
+### 2.2 Package Design
 
-1. `Architecture Role`：Stage1 批准的稳定架构职责和全局语义参与者，不规定实现边界。
-2. `Interface Contract`：Stage2 确定的跨 Unit 字段、方向、时序、有效条件和唯一 owner。
-3. `Implementation Unit`：Stage2 的 Design、源码、测试、验证和调度单位，其实施依赖必须构成 DAG。
+`design/packages/<work-package-id>.md` 是单个 Work Package 的可执行实现契约，至少闭合：
 
-Implementation Unit 可以映射一个或多个 Architecture Role。共享类型、协议或基础设施 Unit 可以不映射 Architecture Role，但必须声明必要性、消费者和源码边界。每个 Architecture Role 必须映射到唯一 Implementation Unit，每个 Interface Contract 和源码路径必须有唯一 owner。
+1. Component 边界和已批准 Interface 的使用方式。
+2. 字段、事件、生产者、消费者、存储位置和生命周期。
+3. 周期行为、异常行为、同拍优先级和 invariant。
+4. 允许修改的全部源码和测试路径。
+5. 断言、定向测试、命令和预期结果。
+6. 风险、排除项、开放问题和动态 `DecisionRequest`。
 
-### 2.2 交互流程
+Package Design 不得自行改变已批准的 shared interface。需要改变时进入 System Design 修订，并使受影响 Work Package 重新对齐。
 
-Stage2 初始化后先进入：
-
-```text
-TOPOLOGY_DISCOVERY
--> TOPOLOGY_DECISION_LOOP
--> TOPOLOGY_REVIEW
--> TOPOLOGY_APPROVED
--> MODULE_LOOP
-```
-
-Topology Planner 先根据已批准 Architecture、现有源码、测试和构建结构建立带未知项的工作模型。它不得一次性生成完整拓扑并要求用户整体接受。
-
-每轮只处理一个当前 ready 的 `topology_decision`：
+## 3. System Design 流程
 
 ```text
-Planner 调研当前问题
--> 形成候选项、推荐、成本、影响范围和待确认问题
--> Workspace Agent 展示一个 Decision Packet
--> 用户选择、自定义或要求补充调研
--> Harness 更新结构化计划和 design/plan.md
--> 失效受影响的后续候选
--> 进入下一项 Decision
+SYSTEM_DESIGN_DRAFT
+-> Agent A 生成完整草案
+-> Agent B 独立审查
+-> 动态 DecisionRequest
+-> Agent A 根据用户结论修订
+-> Agent B 重新独立审查
+-> 用户批准或退回修订 System Design
+-> PACKAGE_LOOP
 ```
 
-Agent 推荐不构成用户批准。用户的自然语言结论必须能够唯一映射到当前 Decision；无法唯一映射时只提出一个澄清问题，不写入正式状态。
+### 3.1 双 Agent 职责
 
-每个 Topology Decision 至少记录：
+Agent A 是 System Design Author。Agent B 是独立 System Design Reviewer。两者使用各自可恢复的 provider session，Harness 只在 assignment 中保存 `runtimeRef`，provider session ID 只进入 Runtime Registry。
 
-1. 稳定 Decision ID、主题、问题、`dependsOn` 和当前状态。
-2. 已批准 Architecture 事实、现有源码证据和仍未知的信息。
-3. 候选方案、Agent 推荐、收益、成本、风险和不采用后果。
-4. 受影响的候选 Unit、Interface Contract、源码范围、DAG edge 和后续 Decision。
-5. 用户选择或完整自定义结论、理由、文档位置、revision 和内容哈希。
+Reviewer 必须基于同一份冻结输入独立检查：
 
-涉及现有源码组织、外部 Chisel 项目惯例或方案权衡时，Planner 先发起来源化 Research Task。Research Worker 负责证据，Planner 只基于证据形成当前 Topology Decision Packet。用户附加的调研关注点只约束证据搜索范围，不直接成为事实或结论。用户要求重新调研时使用显式 refresh，不复用当前 Evidence。命名和不影响职责、所有权、依赖或路径的局部默认值不触发正式调研。
+1. Architecture Role 覆盖。
+2. Component 职责和状态所有权。
+3. Interface owner 和 endpoint。
+4. Work Package 粒度、路径所有权和依赖 DAG。
+5. 验收完整性和 Stage1 越界。
 
-已关闭 Decision 在计划批准前可以显式 reopen。Harness 保留此前结论作为修订基线，使目标 Decision 的旧建议和全部传递依赖候选失效。计划批准后的拓扑修订必须先使 Plan approval 失效，再进入对应 Decision。
+Reviewer 的 `pass` 只表示结构审查通过。System Design 仍需用户明确批准。
 
-### 2.3 决策顺序
+### 3.2 动态 DecisionRequest
 
-默认按以下依赖推进，具体项目可以增加问题：
+Stage2 不再维护固定的 `S2_TOP_*` 决策序列。Author 或 Reviewer 仅在以下高风险问题无法从 Stage1 与项目证据唯一确定时创建动态 `DecisionRequest`：
 
-1. Architecture Role 到 Implementation Unit 的映射及 Unit 合并、拆分边界。
-2. 共享 Bundle、pipeline payload、配置和工具代码的 owner。
-3. Interface Contract 的 owner、生产者、消费者和稳定边界。
-4. Scala package、源码目录、测试目录和顶层集成位置。
-5. Implementation Unit 的 DAG、并行 wave 和集成消费者。
-6. 每个 Unit 的 Design 路径、实现路径范围和完成条件。
+1. pipeline boundary。
+2. global state owner。
+3. identity、retry 或 replay 语义。
+4. control scope。
+5. cross-package interface。
+6. 会明显改变成本、风险或实现路径的工程权衡。
+7. 需要返回 Stage1 的总体架构问题。
 
-前置结论变化时，Harness 使全部传递依赖 Decision 回到待确认状态。已确认内容作为修订基线保留，Planner 只能修改受影响部分。
+每个 Request 必须包含问题、用户必须决策的原因、候选、推荐、后果和影响范围。Agent 推荐不构成用户批准。用户回答后，旧草案和旧审查失效，Author 必须修订，Reviewer 必须重新审查。
 
-### 2.4 正式计划
+局部命名、显然可逆的内部组织和无需用户承担后果的实现选择由 Agent 在 Design 中说明，不创建 DecisionRequest。
 
-Stage2 只新增一个阶段级正式实体：
+### 3.3 用户批准门禁
+
+进入 `PACKAGE_LOOP` 前必须满足：
+
+1. Author 草案通过 Schema 和结构校验。
+2. Reviewer verdict 为 `pass`。
+3. 没有 error finding。
+4. 所有动态 DecisionRequest 已回答并进入新草案。
+5. `design/plan.md` 内容哈希、Architecture approval 哈希、Component topology 哈希、Interface 哈希和 Work Package plan 哈希一致。
+6. 用户明确执行 System Design approval。
+
+### 3.4 待批准草案退回修订
+
+用户审阅完整候选草案后可以拒绝批准，并通过 Harness 登记 System Design Revision Request：
 
 ```text
-design/plan.md
+SYSTEM_DESIGN_APPROVAL
+-> stage2 revise --revision <n> --instruction <text>
+-> SYSTEM_DESIGN_DRAFT
+-> Agent A 修订
+-> Agent B 重新独立审查
 ```
 
-该文件由 Harness 投影，持续展示：
+Revision Request 绑定当前 Design revision 和 document hash，持久化用户原始 instruction，失效当前 Review，并保留旧 Proposal 作为修订基线。Author 启动前可以用同一命令更新 pending Request。Author 自动读取已登记 instruction，Reviewer 必须检查新 Proposal 是否落实该要求。新 Review 通过后才能再次进入 `SYSTEM_DESIGN_APPROVAL`。
 
-1. 已确认约束和用户决策。
-2. 当前临时候选和未决问题。
-3. Implementation Unit、Architecture 映射和职责。
-4. Interface Contract 所有权。
-5. 源码与测试拓扑。
-6. 实施 DAG、wave 和集成点。
-7. 计划 revision、状态和批准哈希。
+该入口只处理尚未批准的 System Design。进入 `PACKAGE_LOOP` 后的全局设计修改继续使用 Design reopen 或 Architecture Rework，不复用该状态转换。
 
-计划讨论期间使用同一文件，不创建 `draft`、`final` 或按 revision 命名的副本。结构化 Decision、依赖、修订和批准记录保存在现有 `.assistant/project.yaml`。
+## 4. Work Package 流程
 
-### 2.5 最终审阅与门禁
-
-进入 `TOPOLOGY_REVIEW` 前必须满足：
-
-1. 所有 blocking Topology Decision 已闭合。
-2. Implementation Unit DAG 无环且所有依赖可解析。
-3. Architecture Role 映射完整，每个 Role 的实现 owner 唯一。
-4. Interface Contract 和源码路径范围没有 owner 冲突。
-5. 每个 Unit 都有 Design、实现、测试和集成责任。
-6. 实施 wave 与验证落点明确。
-
-Workspace Agent 展示完整拓扑、路径规划、DAG、wave、风险和仍然显式排除的内容。只有用户明确批准当前 `design/plan.md` 后，Harness 才绑定 revision 与聚合哈希并进入 `MODULE_LOOP`。第一版不在计划局部确认后提前启动模块 Design。
-
-### 2.6 用户可见状态
-
-`stage2 status` 和 Workspace Agent 必须展示完整实施看板，至少包含：
-
-```text
-Unit | Architecture 映射 | 依赖 | Wave | 状态 | Agent 角色
-Design revision | Design 路径 | 源码归属 | 验证状态 | Blocker
-```
-
-Stage2 初始化、Topology Decision 提交、计划批准、模块状态转换、Design reopen 和验证结束后，Workspace Agent 都要主动展示计划 revision、总体进度、当前 Active、当前 Shadow、当前用户门禁和下一项机器动作。`stage2 next` 继续只返回当前允许处理的一个用户 Decision，机器动作可以并列报告但不能掩盖用户门禁。
-
-### 2.7 旧 Module Loop 状态迁移
-
-旧 Stage2 状态不会自动解释为已确认 Implementation Topology。迁移必须由用户显式触发，并满足尚无已批准 Unit Design、源码写入和验证证据。Harness 执行以下原子转换：
-
-1. 保存旧状态 revision、run ID、thread ID 和 Design 哈希作为迁移来源索引，不复制完整状态快照。
-2. 将未批准 `design/<module-id>.md` 标记为 Topology 未批准导致的失效草案，禁止沿用其批准门禁。
-3. 释放旧 Shadow 和 Active 租约，使旧线程不能提交新结果。
-4. 建立 `design/plan.md`、Topology Decision 状态和新的 Planner 租约。
-5. Planner 可以引用旧草案中的事实和问题，所有 Unit 边界、Interface owner、路径和 DAG 都必须重新经过用户确认。
-
-存在已批准 Design、源码或验证证据时，第一版拒绝自动迁移并报告需要人工闭合的影响范围。schemaVersion 2 到 3 使用顶层产品迁移命令，迁移后从 Architecture Role 重新建立 Topology Decision Loop。
-
-## 3. 单 Unit 循环
-
-```text
-选择 Unit
--> Shadow Align 闭合 Design
--> 用户批准 Design，并选择本 Unit 的验证模式
--> Active Coding 实现
--> Active Coding 完成主验证
--> 按用户选择完成静态审查与验证
--> 修复问题并重跑受影响检查
--> Harness 记录证据并关闭 Unit
--> 双 Agent 满足条件后轮转
-```
-
-每个 Unit 在 Design 批准时都必须单独向用户询问：
-
-> 本 Unit 是否启用独立 Static Review Worker 与独立 Verification Worker？
-
-Harness 不从上一个 Unit 继承选择，也不推断默认值。选择记录为：
-
-1. `independent_workers`：启动两个短生命周期 subagent。
-2. `active_only`：不启动 subagent，由当前 Active Coding Agent 完成静态自审和验证。
-
-## 4. 状态与门禁
-
-Stage2 阶段状态保持：
-
-```text
-TOPOLOGY_DISCOVERY
--> TOPOLOGY_DECISION_LOOP
--> TOPOLOGY_REVIEW
--> TOPOLOGY_APPROVED
--> MODULE_LOOP
--> BASELINE_READY
-```
-
-计划被用户修订时从 `TOPOLOGY_REVIEW` 返回 `TOPOLOGY_DECISION_LOOP`。已批准计划发生内容漂移时进入 `BLOCKED`，不得启动或继续新的模块工作。Architecture 变化时，原计划批准失效并重新执行受影响的 Topology Decision。
-
-`MODULE_LOOP` 内的长期 Unit 状态保持最少：
+每个 Work Package 按以下状态推进：
 
 ```text
 PENDING
 -> DESIGNING
 -> AWAITING_APPROVAL
+-> READY
 -> IMPLEMENTING
 -> VERIFYING
 -> COMPLETE
 ```
 
-`DESIGN_CLOSED`、`PRIMARY_VERIFIED` 和 `VERIFICATION_CLOSED` 是证据门禁，不增加长期状态。
+异常状态为 `NEEDS_REALIGN`、`BLOCKED` 和 `CANCELLED`。
 
-异常处理：
+完整流程：
 
-1. `DESIGN_REOPENED` 是返回 `DESIGNING` 的转换事件。Harness 暂停 Active 的源码写权限并保留其租约，分配 Shadow 处理设计缺口。新 Design 批准后，原 Active 重新读取批准包并校验租约，才能返回 `IMPLEMENTING`。
-2. 已批准共享接口变化时，受影响 Unit 标记为 `NEEDS_REALIGN`，完成影响分析后回到相应正常状态。
-3. 无法继续的模块可标记为 `BLOCKED` 或 `CANCELLED`。
-4. 验证失败返回 `IMPLEMENTING`，保留失败证据。
+```text
+Shadow Agent 生成 Package Design
+-> Harness 校验并投影 Design 文档
+-> 用户批准 Package Design
+-> Active Agent 实现批准路径
+-> Harness 运行主验证
+-> Harness 在独立验证副本运行全部批准命令，同时启动 Static Review Worker
+-> Verification Worker 只读审查 Harness 命令证据与验证覆盖
+-> Static Review Worker 通过
+-> Verification Worker 通过
+-> Harness 复核文件哈希和命令证据
+-> Work Package COMPLETE
+```
 
-### 4.1 Stage2 返回 Stage1 Architecture Rework
+实现发现 Design 缺口时，Active Agent 必须提交带反例的 Design gap。Harness 不应用任何文件，并将 Work Package 返回 `DESIGNING`。
 
-Topology、Unit Design、Implementation 或 Verification 证明已批准 Architecture 有误时，Workspace Agent 形成一个单一 Stage1 repair target 的 Proposal。用户明确确认后，Harness 执行：
+## 5. 双 Agent 轮转
+
+Stage2 固定维护 Agent A 与 Agent B 两个可恢复上下文。角色随 Work Package 轮转。
+
+稳态：
+
+```text
+Agent A: Active Implementation(package N)
+Agent B: Shadow Design(package N+1)
+```
+
+Workspace Agent 每轮只调用一次 `stage2 advance`。Harness 在同一状态快照中最多 claim 一个 Active Implementation 和一个 Shadow Package Design，并使用 `Promise.allSettled` 真实并发启动。两个 Worker 只写独立 runtime 目录，Harness 在项目状态锁内逐项校验并合并。一个 Worker 失败不会取消另一个合法结果。
+
+首包 Design 批准后，当前 Shadow 晋升 Active，另一个 Agent 开始下一个可设计 Package。每次转换由 Harness 原子更新 assignment、lease、base revision、批准哈希和允许路径。
+
+### 5.1 提前轮转
+
+当前 Active 进入 `VERIFYING` 后，Shadow 可以提前晋升到另一个独立 Work Package。必须同时满足：
+
+1. 两个 Package 没有直接或传递依赖。
+2. 当前 Active 的 Package Design 没有 shared interface change。
+3. 新 Active 的其他 implementation dependency 已完成。
+4. 源码和测试路径没有交叠。
+5. 两份 Package Design 均为当前批准版本。
+
+当前 Active 仍需等待两个 Worker 完成。其 assignment 释放后保留 `runtimeRef`，后续修复可以恢复原 provider session。
+
+独立验证失败后，Work Package 保留 blocker 和失败证据。当前 Active 进入 `VERIFYING` 或完成时，Harness 优先把空出的 Active slot 分配给最早的失败 Package，并从该 Package 的 Implementation record 恢复原 `runtimeRef`。待修复 Package 的优先级高于新的 Shadow 晋升，避免提前轮转造成修复饥饿。
+
+依赖当前 Active 的 Package 必须等待当前 Active `COMPLETE` 后才能晋升。
+
+## 6. 固定双 Worker 验证
+
+每个 Work Package 都使用两个独立、短生命周期 Worker，不提供 `active_only` 选项。
+
+### 6.1 Static Review Worker
+
+只读检查冻结副本中的 Design、源码、测试和 diff，输出 Design 一致性、边界条件、回归风险和测试缺口。Static Review 不执行批准命令。
+
+### 6.2 Verification Worker
+
+Harness 在另一份冻结副本中执行 Package Design 批准的完整命令集，再把不可变命令结果交给只读 Verification Worker。Worker 审查命令覆盖、失败含义和验证缺口，报告逐项保留 command ID、runner、required、退出状态、输出摘要和时间。外部助手不直接创建 WSL 或其他构建进程。
+
+历史 Verification Worker 因 `COMMAND_EXECUTION_BLOCKED` 或 `REVIEW_SCOPE_INCOMPLETE` 进入实现修复状态时，显式 `stage2 verify` 可以在文件与批准哈希仍有效的前提下恢复验证，无需重新运行 Active Implementation。
+
+两个 Worker 不能共享 provider session、工作副本或运行 ID。任一 verdict 为 `fail`，任一 error finding 未处理，或任一 required command 失败，Package 都不能进入 `COMPLETE`。
+
+## 7. Runtime Port
+
+Harness 通过 provider-neutral `AgentRuntime` 调用外部助手：
+
+```text
+start(request)
+resume(runtimeRef, request)
+cancel(runtimeRef)
+capabilities()
+```
+
+当前适配器是 `CodexCliRuntime`。`start` 和 `resume` 先返回 `AgentRunHandle`，其中包含 `runId`、`runtimeRef`、事件路径、结果路径、启动时间和完成 Promise。
+
+Runtime Registry 只保存 provider session。Run Ledger 以 `runId` 保存不可变运行证据，包括 task、slot、Package、状态、输入输出哈希、事件时间、deadline、PID 和 runtime 路径。stdout 与 stderr 增量写入 `codex.jsonl`。总 deadline 与 no-event timeout 分离，`stage2 cancel` 终止真实进程树。`stage2 status` 同时读取正式 Ledger 和 runtime 状态文件，识别异常退出的 orphaned run。
+
+System Design approval 后不复用 System Design session 执行 Package 任务。Package session 达到运行次数或累计 prompt 大小阈值时轮换，逻辑 slot、lease 和 Package owner 保持不变。
+
+每个 Worker 的 Task Envelope 携带 hash 绑定的 Read Manifest。Project Reader MCP 只允许读取 Manifest 中的 entry file 和 allowed root，拒绝根目录枚举、无范围搜索及 `.runtime`、构建缓存、未引用遗产等排除路径。
+
+该边界允许后续接入其他 AI provider，同时保持 System Design、Package、审批、哈希和证据模型不变。
+
+## 8. Harness 权限与一致性
+
+Harness 是以下实体的唯一写入者：
+
+1. `.assistant/project.yaml`。
+2. `design/plan.md`。
+3. `design/packages/*.md`。
+4. `verification/packages/*.md`。
+5. 审批记录、Runtime Registry、Worker evidence 和 history。
+
+Agent 通过只读 `processor_project` MCP 读取项目。Active Implementation 只向 Harness 返回结构化文件提案。Harness 在应用前检查：
+
+1. `stateEpoch`、assignment lease、slot、role 和 Work Package revision。
+2. Architecture、System Design、Interface 和 Package Design 哈希。
+3. 每个文件是否属于批准路径。
+4. `baseSha256` 是否匹配磁盘。
+5. 不同 Package 的路径是否互斥。
+
+Git commit 用于项目版本管理，不替代上述权威文件哈希和运行门禁。
+
+## 9. Architecture Rework
+
+Stage2 证据证明总体 Architecture 有误时，用户确认一个 Rework Proposal 后执行：
 
 ```text
 stage2 rework-start
--> 冻结 Stage2，释放 Agent 租约并递增 stateEpoch
--> 重开 Stage1 Decision 或创建 ProjectSpec finding
--> Stage1 Research / Correction / Review / Audit / Approval
+-> 冻结 Stage2 并释放 Agent assignment
+-> Stage1 Decision 或 ProjectSpec 修正
+-> Stage1 review、audit、approval
 -> stage2 rework-resume
--> 失效受影响 Topology Decisions 及其传递依赖
--> 失效受影响 Units 及其 DAG 消费者
--> 重新闭合并批准 design/plan.md
--> 从第一个 ready NEEDS_REALIGN Unit 恢复
+-> System Design 重新生成和独立审查
+-> 用户重新批准 System Design
+-> 受影响 Package 重新对齐
 ```
 
-Proposal 至少包含：
+Rework 必须声明唯一 Stage1 repair target、证据、受影响 Component 和 Work Package。Harness 失效受影响 Package 及其传递消费者，保留无关 Package 的批准、实现和验证证据。新 System Design 批准后，保留项也必须重新绑定新的 System Design 与 Interface 哈希。
 
-1. `summary`、`rationale` 和 `requiredClosure`。
-2. Stage2 `source.kind` 及对应 `decisionId` 或 `unitId`。
-3. 唯一 `repair.kind` 与 `repair.target`。
-4. 当前有效的 `evidenceSources`。
-5. `affectedTopologyDecisions` 和已物化时非空的 `affectedUnits`。
+## 10. schemaVersion 3 与 4 迁移
 
-返工门禁：
-
-1. 同一时刻只允许一个活动 Architecture Rework。
-2. Stage1 新 approval 前，Stage2 保持 `BLOCKED`，旧 lease 和 state epoch 的结果一律拒绝。
-3. ProjectSpec 修正必须使用 Review Correction v2。Audit report 只能定位 finding，不能作为新值 Evidence。
-4. `rework-resume` 校验 Stage1 状态、新 approval、Plan 哈希和冻结后的 Stage2 revision，拒绝并发状态变化。
-5. 受影响 Unit 的旧 Design approval、Implementation 和 Verification 只保存哈希索引，Unit 状态变为 `NEEDS_REALIGN`。
-6. 未受影响 Unit 的状态、Design、实现和验证证据保持不变。未声明 Unit 的删除或内容变化阻止 Plan review；新增 Unit 必须重开 `S2_TOP_001`。
-7. 新 Plan 批准后才归档 Rework。未受影响的 Active 上下文可以使用新 lease 恢复，旧运行结果仍因 epoch 变化失效。
-
-命令入口：
+迁移必须显式执行：
 
 ```text
+processor-agent stage2 migrate <path> --dry-run
+processor-agent stage2 migrate <path> --apply
+```
+
+迁移规则：
+
+1. `--dry-run` 不修改任何文件。
+2. 旧 Topology Decision、Plan、Worker run 和 Architecture Rework 只作为 `legacyEvidence` 索引保留。
+3. 固定 `S2_TOP_*`、Planner、`verificationMode`、`active_only`、旧 Unit assignment 和 state epoch 退出主流程。
+4. 旧 Unit 边界、接口 owner、路径和 DAG 作为候选证据，不能自动升级为 System Design approval。
+5. 已完成的 Stage1 Architecture 保持权威。
+6. 活动 Stage1 Architecture Rework 保持阻塞，直到 Stage1 新 approval 后恢复。
+7. 无活动返工时，迁移后进入 `SYSTEM_DESIGN_DRAFT`。
+8. schema 4 的单一 `dependsOn` 保守迁移为三类依赖，旧 mutable runtime entry 拆为 Session 与 Run。
+9. schema 4 已批准 Design 在哈希可验证时保留，System Design 文档和批准哈希由 Harness 重投影。
+10. schema 5 再次执行迁移时只规范化残留 provider metadata，不重新生成 Design 或改变用户决策。
+
+## 11. CLI 与用户交互
+
+主要命令：
+
+```text
+processor-agent stage2 status <path>
+processor-agent stage2 next <path>
+processor-agent stage2 advance <path>
+processor-agent stage2 cancel <path> <run-id-or-runtime-ref>
+processor-agent stage2 migrate <path> --dry-run|--apply
+processor-agent stage2 start <path>
+processor-agent stage2 draft <path>
+processor-agent stage2 revise <path> --revision <n> --instruction <text>
+processor-agent stage2 decide <path> <decision-id> <option-id>
+processor-agent stage2 decide <path> <decision-id> --text <conclusion>
+processor-agent stage2 approve <path>
+processor-agent stage2 design <path> <work-package-id>
+processor-agent stage2 approve <path> <work-package-id>
+processor-agent stage2 implement <path> <work-package-id>
+processor-agent stage2 verify <path> <work-package-id>
+processor-agent stage2 reopen <path> <work-package-id> --reason <reason>
 processor-agent stage2 rework-start <path> --proposal-json <json>
 processor-agent stage2 rework-resume <path>
 ```
 
-## 5. Design 门禁
+Workspace Agent 每轮先读取 `status` 和 `next`。用户需要拍板时一次只展示一个 DecisionRequest 或 approval gate，同时显示完整 Package board、Agent 角色、blocker 和下一项机器动作。
 
-Design 至少闭合：
+当前不存在用户门禁时，Workspace Agent 调用一次 `stage2 advance`。`design`、`implement` 和 `verify` 只用于诊断和精确重试。
 
-1. 模块边界、接口和状态所有权。
-2. 字段语义、生产者、消费者、设置、清除和有效区间。
-3. 周期边界、组合路径和寄存位置。
-4. stall、flush、kill、retry、replay 和异常路径。
-5. 同拍事件优先级。
-6. ownership、release、reuse 和 late response。
-7. 全局 Architecture 与共享协议映射。
-8. 断言、定向测试和集成验收条件。
-9. 时序、面积和验证成本的已知风险。
-
-用户批准包同时包含：
-
-1. Design revision 与内容哈希。
-2. 允许修改的源码和测试路径。
-3. 验收命令、断言和预期结果。
-4. 本 Unit 的 `verificationMode`。
-
-批准后的 Design 对 Active Coding Agent 只读。实现发现设计缺口时，Active Coding Agent 必须提交带反例的 `DESIGN_REOPENED` 请求，不得自行增加协议、状态或保守限制。
-
-## 6. Agent 职责
-
-### 6.1 Workspace Agent
-
-1. 作为唯一用户交互入口。
-2. Topology 阶段只展示一个当前 Decision，并同步完整实施看板。
-3. Module Loop 展示当前 Unit、Design 批准包和验证模式问题。
-4. 不代替用户批准 Implementation Topology、Design 或验证模式。
-5. 只通过 Harness 查询和提交正式状态。
-
-### 6.2 Topology Planner
-
-1. 读取已批准 Architecture、现有源码、测试和构建组织。
-2. 建立带未知项的 Implementation Topology 工作模型。
-3. 围绕当前单一 Topology Decision 调研并形成候选、推荐和影响分析。
-4. 不修改 Architecture、RTL 和测试，不代替用户拍板。
-5. 将结构化提案交给 Harness 更新 `design/plan.md`。
-
-Topology 阶段由 Agent A 承担 Planner 角色，Agent B 保持 idle。计划批准后，Planner 上下文可以转为第一个 Unit 的 Shadow，但必须重新读取批准计划、Task Envelope、租约和 state epoch。
-
-### 6.3 Shadow Align
-
-1. 读取 Architecture、相关源码、测试和上游协议。
-2. 与用户闭合当前 Unit Design 和验收条件。
-3. 不修改 RTL 和测试。
-4. 将 Design 提案交给 Harness 投影为正式文档。
-
-### 6.4 Active Coding
-
-1. 只在 `DESIGN_CLOSED` 后获得实现租约。
-2. 读取已批准 Design，并只修改批准包中的源码和测试路径。
-3. 完成最小实现、断言、测试和主验证。
-4. 在 `active_only` 模式下，额外执行分离的静态自审和验证步骤。
-5. 不修改已批准 Design、Architecture 和 Harness 状态。
-
-### 6.5 短生命周期验证 Worker
-
-仅在用户为当前 Unit 选择 `independent_workers` 时创建：
-
-1. Static Review Worker 只读审查 RTL、测试、Diff 和 Design 一致性，不修改文件。
-2. Verification Worker 在独立上下文运行批准的 WSL 验证命令，不修改 Design、源码和测试。
-3. 两个 Worker 可以并行执行，结果都返回 Harness。
-4. Worker 不参与双 Agent 轮转，任务完成后即结束。
-
-Harness 是 `.assistant/project.yaml`、审批记录和正式证据投影的唯一写入者。Agent 不直接修改这些内容。
-
-Stage2 Agent 通过 Harness 注入的只读 `processor_project` MCP 枚举、搜索和读取项目文件。该通道同时注入新线程与恢复线程，不依赖 Shell、PowerShell、cmd 或交互会话的 execpolicy allowlist。独立 Verification Worker 只允许通过 Shell 执行批准包中的命令。
-
-Harness 为每次角色执行生成 Task Envelope。Topology 阶段至少包含当前 Decision、已确认结论、修订基线、受影响候选和计划哈希。Module Loop 至少包含当前角色、Unit ID、Architecture 映射、权威文档及哈希、允许路径、Interface Contract、依赖 Unit、验收条件、`verificationMode`、租约、state epoch 和下一项允许动作。Agent 不得根据模块名、最近文件修改或对话相似性猜测自身身份和权限。
-
-在源码编辑、长时间验证、状态转换和角色轮转前，Harness 都要重新检查租约、state epoch 与批准 Design 哈希。Git commit 不能替代实际权威文件哈希。任一检查过期时立即拒绝操作，已有 Agent 上下文不能覆盖磁盘状态。
-
-## 7. 双 Agent 轮转
-
-Stage2 保留两个可恢复的 Windows Codex 上下文。角色绑定到阶段和模块，不永久绑定到线程。Chisel 构建与验证命令按批准的 runner 在 WSL 执行。
-
-稳态流水：
-
-```text
-Agent A: Active Coding(module N)
-Agent B: Shadow Align(module N+1)
-```
-
-允许轮转的条件：
-
-1. Active 模块已达到 `COMPLETE`。
-2. Shadow 模块已通过 `DESIGN_CLOSED`。
-3. 两个模块的文档、哈希和交接信息均为当前版本。
-4. 不存在未解决的共享接口冲突。
-5. 当前 Unit 要求的测试和 Worker 均已结束。
-
-轮转后，原 Shadow 成为其已闭合模块的 Active，原 Active 成为下一个模块的 Shadow。Harness 原子更新两个角色、租约和 state epoch，各 Agent 重新读取项目规则、状态和批准包后才能写入。
-
-Stage2 启动方式：
-
-```text
-Agent A: Topology Planner
-Agent B: idle
-
-Implementation Topology 批准后：
-Agent A: Shadow Align(first ready unit)
-Agent B: idle
-
-first unit Design 批准后：
-Agent A: Active Coding(first ready unit)
-Agent B: Shadow Align(next ready unit)
-```
-
-`first ready unit` 和 `next ready unit` 由已批准 Implementation DAG 与 wave 决定，不由 Architecture Role 的展示顺序决定。仅当依赖已经满足且写入路径互不相交时允许 Shadow Design 与 Active Implementation 并行。任一路径同一时刻只有一个写入者。
-
-## 8. 验证闭环
-
-所有 Implementation Unit 都必须先由 Active Coding Agent 完成主验证，包括构建、定向测试、必要断言及批准包要求的命令。
-
-`PRIMARY_VERIFIED` 至少要求 elaboration 与编译成功、批准的定向测试通过、要求的随机或压力测试通过、无断言失败，并记录命令、seed、cycle count、结果和日志引用。仅编译成功不能通过该门禁。
-
-### 8.1 `independent_workers`
-
-1. 主验证通过后启动 Static Review Worker 和 Verification Worker。
-2. Static Review Worker 输出 Design 一致性、边界条件、潜在回归和测试缺口。
-3. Verification Worker 独立运行批准命令，记录命令、种子、周期、退出状态和日志引用。
-4. 任一 Worker 发现问题后，Active Coding Agent 修复，所有受影响检查必须重跑。
-5. 源码或测试变化会使对应旧报告失效。
-6. 两个 Worker 都结束、有效 finding 已修复、被拒绝 finding 已附具体 invariant 或证据后，才能通过 `VERIFICATION_CLOSED`。
-
-### 8.2 `active_only`
-
-1. Active Coding Agent 在主实现步骤后执行一次分离的静态自审。
-2. Active Coding Agent 再运行完整批准验证集并保存证据。
-3. 证据明确记录 `performedBy: active`、`independent: false` 和 `waivedByUser: true`。
-4. Harness 不得将该结果表述为独立审查或独立验证。
-
-两种模式都必须通过同一正确性和可追溯性门禁。差别只在独立性和执行成本。
-
-Unit 进入 `COMPLETE` 还要求 Design、源码、测试和证据一致，不存在当前 Unit 的必需工作，已知排除项已经记录，并明确下一个集成消费者。Harness 的阶段报告必须包含实施看板、角色、Unit、状态、批准 revision、修改文件、验证证据、共享接口变化、依赖 Unit、阻塞项和下一项允许动作。
-
-## 9. Role 映射、拓扑一致性与最小持久实体
-
-Stage1 批准后，Stage2 将 Stage1 ProjectSpec 中的 Architecture Role、全局语义和完成条件视为只读输入。`design/plan.md` 中稳定的 Implementation Unit ID 是 Stage2 Design、源码、验证、调度和状态看板的主键。
-
-Architecture 与 Implementation Topology 承担不同职责：
-
-1. Architecture Role 表示稳定职责，不携带实现依赖、源码路径或 Chisel 层级。
-2. Global Protocol 通过 ownerRole、producerRoles、consumerRoles 和 affectedResources 描述稳定语义参与关系。
-3. Implementation Unit `dependsOn` 表示 Design 与实现前置关系，必须形成 DAG。
-4. 每个 Architecture Role 映射到唯一 Implementation Unit；一个 Unit 可以承载多个紧耦合 Role。
-5. foundation 或 shared contract Unit 可以不承载 Architecture Role，但必须拥有明确产物并被至少一个 Unit 消费。
-6. 每个 Interface Contract 声明唯一 owner、生产者、消费者、字段边界和冻结状态。
-
-Design 与 `src/` 必须保持以下拓扑一致性：
-
-1. 每个 Implementation Unit ID 只对应一份 `design/<unit-id>.md`。
-2. 每份已批准 Design 通过 `implementation.sourcePaths` 和 `implementation.testPaths` 声明该 Unit 拥有的实现路径。
-3. 每个源码或测试路径只允许一个 Unit ID 拥有。共享 Bundle、公共工具和集成文件也必须指定唯一 owner，其他 Unit 通过批准的 Interface Contract 或源码引用消费。
-4. `design/` 与 `src/` 的物理目录无需逐层镜像。稳定映射由 Unit ID、Design 中的路径集合和内容哈希共同确定。
-5. Active Coding 只能修改当前 Unit 已批准的路径集合。路径新增、删除或 owner 迁移必须先修订 Implementation Plan，再重新批准受影响 Design。
-6. Unit 完成时，Design 声明的全部路径必须存在，源码和测试哈希必须与验证证据一致。
-
-Harness 在 Plan 批准前检查 Unit ID、Architecture Role 唯一映射、Interface owner、源码范围和 DAG。Harness 在 Design 批准前检查路径位于 `src/main/` 或 `src/test/`、单份 Design 内没有路径别名或重复、不同 Unit 没有路径所有权重叠。Harness 在实现和验证阶段继续使用批准 Design 的路径集合限制写入并检查漂移。
-
-首个 Unit 产生内容时，最小正式实体为：
+## 12. 最小持久实体
 
 ```text
 design/plan.md
-design/<unit-id>.md
-src/main/scala/.../<owned-source>.scala
-src/test/scala/.../<owned-test>.scala
-verification/<unit-id>.md
+design/packages/<work-package-id>.md
+verification/packages/<work-package-id>.md
+src/main/...
+src/test/...
 .assistant/project.yaml
 ```
 
-实际源码和测试路径以已批准的 Plan 与 Unit Design 为准。`verification/<unit-id>.md` 汇总主验证、用户验证模式、审查结果和最终证据，不为两个 Worker 分别创建长期报告文件。
+原始运行日志、冻结副本和 Worker 输出进入工作区级 `.runtime/`。不创建长期 task、handoff、snapshot、decision 或 agent 目录。
 
-`.assistant/project.yaml` 在现有项目状态中记录 Topology Decision、Implementation Unit、DAG、wave、Unit 状态、角色、线程标识、租约、state epoch、批准哈希、`verificationMode`、允许路径和证据引用。原始日志、临时工作树和 Worker 输出进入工作区级 `.runtime/`。
+## 13. Baseline 完成条件
 
-第一版只新增 `design/plan.md`，不新增独立 Stage2 状态文件、Decision 目录、任务目录、Schema 目录、handoff 目录或 `.codex/chisel-workflow/`。Implementation Plan、Unit Design、批准哈希、允许路径和验收条件构成正式交接面。
+进入 `BASELINE_READY` 必须满足：
 
-## 10. Baseline 聚合
+1. 所有 baseline Work Package 为 `COMPLETE`。
+2. 每个 Package 的 Design、实现文件和验证证据哈希一致。
+3. 两个独立 Worker 均通过。
+4. Core 构建、elaboration、定向测试和集成测试通过。
+5. Stage1 Architecture、System Design、Package Design、源码和测试映射一致。
+6. 已知排除项和延期项进入正式文档。
 
-```text
-BASELINE_BUILDING
--> BASELINE_INTEGRATING
--> BASELINE_VERIFYING
--> READY
-```
-
-`READY` 要求：
-
-1. 所有 baseline 必需 Implementation Unit 已经完成。
-2. Core 可以构建和 elaboration。
-3. 定向测试与集成测试通过。
-4. 性能计数器可用。
-5. Architecture、Design、源码和验证映射一致。
-6. Git 工作区干净，baseline commit 已冻结。
-
-## 11. Architecture Change
-
-Architecture Change 完成影响分析后复用同一模块循环：
-
-```text
-Architecture Idea
--> Contract 与影响分析
--> 检查 Implementation Topology 是否仍然适用
--> 确定受影响 Unit
--> 逐 Unit Design、Implementation、Verification
--> 整体回归与一致性审查
--> Change Complete
-```
-
-Architecture Change 改变 Unit 边界、Interface owner、源码 owner 或 DAG 时，先重新进入受影响的 Topology Decision。每个受影响 Unit 仍需独立批准 Design，并单独选择 `verificationMode`。文档、源码、测试和证据全部闭合后，Change 才能进入 `COMPLETE`。
-
-## 12. 第一版范围
+## 14. 第一版范围
 
 第一版覆盖：
 
-1. Topology Planner 与用户逐项闭合 Implementation Topology。
-2. `design/plan.md`、Topology Decision、最终审阅和批准哈希。
-3. `stage2 status` 与 Workspace Agent 的完整实施看板。
-4. 以批准计划中的首个 ready Unit 完成完整闭环。
-5. Shadow Align 与 Active Coding 双 Agent 轮转。
-6. 用户按 Unit 选择两个独立验证 Worker 或 Active 自行验证。
-7. WSL 中的 Chisel 构建、定向测试和证据记录。
-8. `dual_issue_demo` baseline 所需 Unit 和首个同拍 ALU 前递 Change。
-9. Stage2 暴露 Architecture 错误时的 Stage1 返工、新批准和选择性失效闭环。
+1. System Design Author 与独立 Reviewer。
+2. 动态 DecisionRequest 和两级用户批准。
+3. Package Design、Implementation 和固定双 Worker 验证。
+4. 两个可恢复 Agent 的稳定轮转、真实并发与受限提前轮转。
+5. 有界 Read Manifest、canonicalization 和 hash 绑定局部 Patch。
+6. Session 与 Run 分层、增量事件、deadline、cancel 和 orphan recovery。
+7. provider-neutral Runtime Port 和 Codex CLI adapter。
+8. Architecture Rework 和受影响 Package 选择性失效。
+9. schemaVersion 3 与 4 显式迁移。
+10. `dual_issue_demo` baseline 的真实跑通。
 
-第一版暂不覆盖完整形式验证、自动模块调度、多构建系统和多模块并行实现。
+第一版暂不做正式对照实验、自动性能优化、多 Package 并行写入、完整形式验证和多构建系统适配。

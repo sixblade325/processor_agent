@@ -13,12 +13,19 @@ export interface LoadedSkill {
 const TASK_SKILLS: Record<Stage2AgentTask, string[]> = {
   topology_research: ["design-chisel-processor"],
   topology_planning: ["design-chisel-processor"],
+  system_design_draft: ["design-chisel-processor"],
+  system_design_review: ["design-chisel-processor"],
   shadow_design: ["design-chisel-processor"],
+  package_design: ["design-chisel-processor"],
+  package_design_patch: ["design-chisel-processor"],
   active_implementation: ["design-chisel-processor", "implement-chisel-processor"],
+  package_implementation: ["design-chisel-processor", "implement-chisel-processor"],
   active_static_review: ["implement-chisel-processor"],
   active_verification_review: ["implement-chisel-processor"],
   independent_static_review: ["implement-chisel-processor"],
   independent_verification: ["implement-chisel-processor"],
+  package_static_review: ["design-chisel-processor", "implement-chisel-processor"],
+  package_verification: ["implement-chisel-processor"],
 };
 
 export async function loadStage2TaskSkills(task: Stage2AgentTask): Promise<LoadedSkill[]> {

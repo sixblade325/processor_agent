@@ -16,16 +16,16 @@ Stage1 让用户与助手通过调研、追问和逐项确认，形成一份用�
 -> 全局架构决策
 -> Processor Architecture Snapshot
 -> 项目骨架
--> Stage2 Topology Planning 输入
+-> Stage2 System Design 输入
 ```
 
-Stage1 负责目标与约束、全局 Architecture、Architecture Role、共享语义、项目级验证策略和用户批准。Architecture Role 只标识稳定的架构职责，不预先决定 Chisel Module 或 Implementation Unit 边界。Implementation Unit 划分、Interface owner、源码拓扑、实施 DAG、模块内部状态机、具体 Chisel 实现、完整测试开发和 baseline 集成进入 Stage2。性能优化进入 Stage3。
+Stage1 负责目标与约束、全局 Architecture、Architecture Role、共享语义、项目级验证策略和用户批准。Architecture Role 只标识稳定的架构职责，不预先决定 Chisel Module、Design Component 或 Work Package 边界。Component 划分、Interface owner、源码拓扑、Package DAG、模块内部状态机、具体 Chisel 实现、完整测试开发和 baseline 集成进入 Stage2。性能优化进入 Stage3。
 
 `STAGE1_COMPLETE` 表示：
 
 1. 全局架构已经批准。
 2. 工具链和项目骨架可以进入开发。
-3. Architecture Role、全局语义和完成条件足以启动 Stage2 Topology Decision Loop，Stage2 无需发明总体行为。
+3. Architecture Role、全局语义和完成条件足以启动 Stage2 System Design，Stage2 无需发明总体行为。
 4. baseline RTL 尚不要求完成。
 
 ## 1.1 当前实现快照
@@ -281,7 +281,7 @@ Stage1 按以下主题推进：
 8. 修正后重新读取 `status` 和 `next`。`next` 必须携带此前结论、修正原因和完整修订候选，Profile 默认推荐不得覆盖此前讨论结果。
 9. `revise_previous` 只能通过 `custom` 提交 `proposedCustomAnswer`，并继续受显式用户确认门禁约束。
 10. Audit finding 按 6.5 节进入对应修正入口。`relatedDecision` 不能替代 `repairKind`，没有 Decision owner 的项目事实不得强行通过 `reopen` 修正。
-11. 最终审阅展示已确认事项、deferred 项、open finding、生成预览、Architecture Role 和 Stage2 Topology Planning 输入。
+11. 最终审阅展示已确认事项、deferred 项、open finding、生成预览、Architecture Role 和 Stage2 System Design 输入。
 
 用户始终面对一个 Workspace Agent。Harness 拥有交互状态、问题队列、审批和恢复逻辑。Codex CLI 通过结构化任务生成调研、方案和文档更新。
 
@@ -361,7 +361,7 @@ Stage1 使用逻辑产物定义职责，实际文件按首次内容创建，不�
 2. 工具链、执行位置、构建入口和验证入口已经确定。
 3. ISA Profile 与系统边界已经批准。
 4. 执行模型、流水边界、发射与退休规则已经批准。
-5. Architecture Role 及其职责已经批准，且未预先绑定 Implementation Unit 或 Chisel Module。
+5. Architecture Role 及其职责已经批准，且未预先绑定 Design Component、Work Package 或 Chisel Module。
 6. 全局协议与共享流水字段的架构语义已经闭合。
 7. 全局 stall、flush、redirect、exception、kill 和 backpressure 语义已经闭合。
 8. 必需调研具有来源，可采用结论已经进入正式文档。
@@ -369,7 +369,7 @@ Stage1 使用逻辑产物定义职责，实际文件按首次内容创建，不�
 10. 验证策略和 Stage2 完成条件已经确定。
 11. 用户批准绑定当前文档 revision 和聚合哈希。
 12. 项目骨架、Git 和机器状态可以从磁盘恢复。
-13. 新的 Agent 只读取项目文件即可说明当前架构和 Stage2 Topology Planning 的输入边界。
+13. 新的 Agent 只读取项目文件即可说明当前架构和 Stage2 System Design 的输入边界。
 14. 当前文档哈希对应的独立 audit 已通过，且不存在 open Review Correction。
 
 ## 12. 第一版 `dual_issue_demo` Profile
@@ -411,7 +411,7 @@ baseline 禁止 `lane0 -> lane1` 同拍 RAW 配对属于需要用户批准的架
 5. 修改已批准 Architecture 后批准自动失效。
 6. Agent 推荐能够追溯到项目事实或调研来源。
 7. Stage1 不生成未经批准的 baseline RTL。
-8. 新 Agent 可以根据产物生成正确的 Stage2 首个 Topology Decision Task Envelope。
+8. 新 Agent 可以根据产物生成正确的 Stage2 System Design Task Envelope。
 9. Audit 发现 Decision 之外的项目事实缺口时，可以在不手工编辑生成文档、不修改通用 Profile 的情况下完成项目级修正。
 10. 每项 Review Correction 可以追溯到 finding、用户确认、结构化字段变化和重新审查结果。
 
@@ -440,6 +440,6 @@ baseline 禁止 `lane0 -> lane1` 同拍 RAW 配对属于需要用户批准的架
 19. Stage2 可以冻结 Agent 租约后返回 Stage1，重开 Decision 或创建 ProjectSpec finding。新 Review、Audit 和用户 Approval 完成后生成新的 Architecture approval。
 20. Stage1 自动测试覆盖 33 项，包括 Review Correction v2 Evidence 门禁、finding 顺序、压缩 sidecar、Profile refresh、override release、v1 迁移和两类 Architecture Rework 入口。
 
-隔离端到端验证覆盖 `init -> decisions -> review -> audit -> approve -> scaffold -> complete`，最终状态为 `STAGE1_COMPLETE`。Workspace Agent 端到端验证覆盖 `open -> status -> next -> 自然语言回答 -> answer -> next`。Stage2 已能从该状态生成首个 Topology Decision Task Envelope，不再直接消费 `architecture.stage2Order` 启动 Module Loop。
+隔离端到端验证覆盖 `init -> decisions -> review -> audit -> approve -> scaffold -> complete`，最终状态为 `STAGE1_COMPLETE`。Workspace Agent 端到端验证覆盖 `open -> status -> next -> 自然语言回答 -> answer -> next`。Stage2 已能从该状态生成 System Design Task Envelope，不再直接消费 `architecture.stage2Order` 启动模块循环。
 
 尚未实现的已确认 Stage1 缺口：命令中断期间的通用多文件事务自动恢复、自由形式 discovery 与 synthesis、本地 Web 界面。

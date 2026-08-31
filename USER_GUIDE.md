@@ -4,7 +4,7 @@
 
 Processor Agent 是本地运行的处理器开发工作流 Harness。它负责保存阶段状态、组织架构决策、调用 Codex CLI、生成正式文档、执行门禁，并在批准后建立 Chisel 项目骨架。
 
-当前可用范围是 Stage1 Architecture Definition 和 Stage2 Topology 与 Unit Development Loop。Stage3 优化闭环和本地 Web 工作台仍在开发。
+当前可用范围是 Stage1 Architecture Definition 和 Stage2 System Design 与 Work Package Development Loop。Stage3 优化闭环和本地 Web 工作台仍在开发。
 
 ## 2. 文件职责
 
@@ -27,13 +27,15 @@ user_project/
 ├── AGENTS.md                 项目协作约束
 ├── architecture/
 │   └── overview.md           整核架构事实、Architecture Role 和决策
-├── design/                   Stage2 Implementation Plan 与 Unit Design，按需创建
+├── design/
+│   ├── plan.md              Stage2 System Design
+│   └── packages/            Package Design，按需创建
 ├── research/
 │   └── stage1.md             Stage1 来源化调研结论
 ├── src/                      Chisel 源码和测试，按 Design 生成
 ├── verification/
 │   ├── plan.md               验证策略和完成门禁
-│   └── <unit>.md             Unit 验证记录，按需创建
+│   └── packages/            Work Package 验证记录，按需创建
 └── .assistant/
     ├── project.yaml          Stage1/Stage2 当前状态、revision、哈希和历史索引
     ├── project-spec-history-<hash>.json.gz
@@ -244,11 +246,11 @@ node dist\src\cli.js stage1 scaffold E:\107\my_core
 node dist\src\cli.js stage1 complete E:\107\my_core
 ```
 
-`STAGE1_COMPLETE` 表示全局架构、Architecture Role、验证策略和构建骨架已经闭合。Implementation Unit 和 Chisel Module 边界在 Stage2 确定，Baseline RTL 也在 Stage2 实现。
+`STAGE1_COMPLETE` 表示全局架构、Architecture Role、验证策略和构建骨架已经闭合。Design Component、Interface Skeleton、Work Package 和 Chisel Module 边界在 Stage2 确定，Baseline RTL 也在 Stage2 实现。
 
 ## 8. Stage2 引导式实现
 
-Stage2 只接受 `STAGE1_COMPLETE` 且 Architecture 批准哈希未漂移的项目。初始化后先进入 Implementation Topology Decision Loop，Harness 生成唯一 `design/plan.md`，Agent A 担任 Planner，Agent B 保持 idle。Implementation Topology 只由 Stage2 状态拥有。权威设计见 [PRODUCT_PLAN/STAGE2.md](./PRODUCT_PLAN/STAGE2.md)。
+Stage2 只接受 `STAGE1_COMPLETE` 且 Architecture 批准哈希未漂移的项目。初始化后，Harness 生成唯一 `design/plan.md`，Agent A 形成 System Design 草案，Agent B 在独立可恢复上下文中审查。权威设计见 [PRODUCT_PLAN/STAGE2.md](./PRODUCT_PLAN/STAGE2.md)。
 
 ```powershell
 node dist\src\cli.js stage2 init E:\107\my_core
@@ -256,95 +258,113 @@ node dist\src\cli.js stage2 status E:\107\my_core
 node dist\src\cli.js stage2 next E:\107\my_core
 ```
 
-`stage2 next` 每次只返回一个当前 Topology Decision。`topology_planning` 动作先运行独立 Research Worker，再由可恢复 Planner 生成候选、推荐、成本、风险和结构化 Plan patch：
+schemaVersion 3 或 4 的项目必须先只读预检，再显式迁移：
 
 ```powershell
-node dist\src\cli.js stage2 plan E:\107\my_core S2_TOP_001
-node dist\src\cli.js stage2 plan E:\107\my_core S2_TOP_001 --instruction "优先检查状态 owner 和既定寄存边界"
-node dist\src\cli.js stage2 plan E:\107\my_core S2_TOP_001 --instruction "重新核对现有源码边界" --refresh
-node dist\src\cli.js stage2 answer E:\107\my_core S2_TOP_001 recommended
-node dist\src\cli.js stage2 custom E:\107\my_core S2_TOP_001 --text "完整自定义结论"
+node dist\src\cli.js stage2 migrate E:\107\my_core --dry-run
+node dist\src\cli.js stage2 migrate E:\107\my_core --apply
 ```
 
-`--instruction` 同时传给 Research Worker 和 Planner。Research Worker 只能把它作为搜索关注点，不能把用户措辞当成已确认事实。`--refresh` 强制创建新的独立 Research 运行并替换当前 Decision 的 Evidence。`design/plan.md` 会显示每个候选的结构化 Unit、owner、Interface、路径、DAG 或完成条件，不只显示摘要。
+旧 Topology Decision、Plan、Worker run 和 Architecture Rework 只保留为 `legacyEvidence`。旧 Unit 边界和路径不会自动获得新的 System Design approval。
 
-已确认 Decision 在 Plan 批准前可以重开。Harness 保留旧结论与哈希，并使全部传递依赖失效：
+schemaVersion 4 项目的单一 `dependsOn` 会保守迁移为 Design、Implementation 和 Integration 三类依赖。Runtime entry 拆为 Session 与不可变 Run。已经批准的 Design 在哈希可验证时保留。schemaVersion 5 项目重复执行迁移时只清理 Runtime Registry 之外残留的 provider session ID。
+
+运行两个 System Design Agent：
 
 ```powershell
-node dist\src\cli.js stage2 topology-reopen E:\107\my_core S2_TOP_001 --reason "Unit 边界需要修正"
+node dist\src\cli.js stage2 start E:\107\my_core
 ```
 
-全部 Decision 闭合后，Harness 检查 Architecture Role 唯一映射、Interface owner、路径 owner、Unit DAG、wave 和完成条件。用户审阅完整看板后明确批准 Plan：
+`stage2 start` 先让 Agent A 生成 Component、Interface Skeleton、Work Package、路径 owner 和 Package DAG，再让 Agent B 独立审查。两者需要修订时继续运行：
 
 ```powershell
-node dist\src\cli.js stage2 review E:\107\my_core
-node dist\src\cli.js stage2 approve-plan E:\107\my_core
+node dist\src\cli.js stage2 draft E:\107\my_core
 ```
 
-schemaVersion 1 的旧 Module Loop 需要显式迁移。只有尚无已批准 Design、源码和验证证据时允许自动迁移：
+Author 或 Reviewer 只为高风险未知项创建动态 `DecisionRequest`。`stage2 next` 一次返回一个当前用户门禁。用户可以选择候选或提交完整结论：
 
 ```powershell
-node dist\src\cli.js stage2 migrate E:\107\my_core
+node dist\src\cli.js stage2 decide E:\107\my_core <decision-id> <option-id>
+node dist\src\cli.js stage2 decide E:\107\my_core <decision-id> --text "完整结论"
 ```
 
-Plan 批准后，当前 ready Unit 进入 Shadow Align：
+回答后旧草案和旧审查失效。再次运行 `stage2 draft`，直到独立 Review 通过且没有开放 Decision。用户审阅完整 `design/plan.md` 后可以批准，也可以登记修订要求：
 
 ```powershell
-node dist\src\cli.js stage2 design E:\107\my_core regfile
+node dist\src\cli.js stage2 approve E:\107\my_core
+node dist\src\cli.js stage2 revise E:\107\my_core --revision 3 --instruction "Issue 逻辑进入 Instruction Queue，删除独立 Issue Component。"
 ```
 
-Harness 将结果写入 `design/regfile.md`。Design 可以携带未决问题落盘，此时状态保持 `AWAITING_APPROVAL`，`stage2 next` 返回 `design_revision` 和完整缺口，批准门禁拒绝继续。用户回答后，通过附加指令让同一 Shadow 上下文修订：
+`stage2 revise` 只接受当前待批准的 System Design revision。Harness 绑定当前文档 hash、持久化 instruction、失效旧 Review，并返回 `SYSTEM_DESIGN_DRAFT`。Author 尚未启动时，重复执行相同 revision 的命令会更新 pending Revision Request。随后运行 `stage2 draft`，Agent A 自动读取该请求，Agent B 重新独立审查。PowerShell `.cmd` 对多行参数可能截断，第一版请把多项要求组织在一个单行参数中。
+
+System Design 批准后，Harness 建立 Work Package board 并把第一个 ready Package 分配给 Shadow Agent：
 
 ```powershell
-node dist\src\cli.js stage2 design E:\107\my_core regfile --instruction "读端口为两个组合读口，写口在时钟上升沿提交"
+node dist\src\cli.js stage2 advance E:\107\my_core
 ```
 
-每个 Unit ID 固定对应 `design/<unit-id>.md`。Design 中的 `implementation.sourcePaths` 和 `implementation.testPaths` 必须与已批准 Plan 一致。Harness 拒绝路径 owner 重叠。共享源码和集成文件的 owner 变化需要重开对应 Topology Decision。
-
-Design 闭合后，用户必须为该 Unit 明确选择验证模式：
+Harness 将结果写入 `design/packages/wp_regfile.md`。Package Design 可以携带未决问题，此时保持 `AWAITING_APPROVAL`。正常机器动作都通过 `stage2 advance` 派发。用户回答后需要精确修订同一 Package 时使用诊断入口：
 
 ```powershell
-node dist\src\cli.js stage2 approve E:\107\my_core regfile --verification-mode independent_workers
-node dist\src\cli.js stage2 approve E:\107\my_core regfile --verification-mode active_only
+node dist\src\cli.js stage2 design E:\107\my_core wp_regfile --instruction "读端口为两个组合读口，写口在时钟上升沿提交"
 ```
 
-`independent_workers` 在主验证通过后并行启动只读 Static Review Worker 和隔离 Verification Worker。`active_only` 由当前 Active Coding Agent 顺序完成静态自审和最终验证，正式记录包含 `independent: false` 与 `waivedByUser: true`。选择不从上一 Unit 继承。
+每个 Work Package 固定拥有自己的 Component、Design 文档、源码路径和测试路径。Harness 拒绝 path owner 重叠。Package Design 改变 shared interface 时无法批准，必须先修订 System Design。
 
-批准后执行实现与验证：
+Package Design 闭合后由用户批准：
 
 ```powershell
-node dist\src\cli.js stage2 implement E:\107\my_core regfile
-node dist\src\cli.js stage2 verify E:\107\my_core regfile
+node dist\src\cli.js stage2 approve E:\107\my_core wp_regfile
 ```
 
-Active Coding 只提交批准路径内的完整文件内容。Harness 检查 Design 哈希、租约、state epoch、原文件哈希和允许路径后写入，再执行批准命令。实现发现 Design 缺口时必须返回理由和反例，Harness 自动重开 Design。用户也可以显式重开：
+批准后继续推进：
 
 ```powershell
-node dist\src\cli.js stage2 reopen E:\107\my_core regfile --reason "同地址读写语义需要修正"
+node dist\src\cli.js stage2 advance E:\107\my_core
 ```
 
-Harness 按任务加载 `design-chisel-processor` 与 `implement-chisel-processor`，将适用方法注入 Codex 上下文。Skill 名称和内容哈希随 Design、Implementation、Review 与 Task Envelope 记录，正文不复制到用户项目。
+`stage2 implement` 与 `stage2 verify` 保留为精确重试入口。一次 `stage2 advance` 可以同时运行一个 Active Implementation 和一个 Shadow Package Design。
+
+旧 Verification Worker 因 `COMMAND_EXECUTION_BLOCKED` 或 `REVIEW_SCOPE_INCOMPLETE` 留下基础设施 blocker 时，修复 Harness 后直接重跑 `stage2 verify`。Harness 会复核批准 Design、实现哈希和文件状态，再恢复独立验证，不会要求 Active Agent 重写源码。
+
+Active Agent 只提交批准路径内的完整文件内容。Harness 检查 `stateEpoch`、Package revision、Design 哈希、assignment lease、原文件哈希和允许路径后写入，再执行批准命令。实现发现 Design 缺口时必须返回理由和反例，Harness 自动重开 Design。用户也可以显式重开：
+
+```powershell
+node dist\src\cli.js stage2 reopen E:\107\my_core wp_regfile --reason "同地址读写语义需要修正"
+```
+
+主验证通过后，Harness 总是创建两个独立短生命周期 Worker。Static Review Worker 只读检查 Design 一致性。Harness 在另一份冻结副本运行全部批准命令，Verification Worker 只读审查这份命令证据和验证覆盖。两者均通过后 Package 才进入 `COMPLETE`。
+
+Agent A 与 Agent B 在 Shadow Design 和 Active Implementation 间轮转。当前 Active 进入 `VERIFYING` 后，无依赖、无 shared interface change 且路径不重叠的 Shadow Package 可以提前晋升。
+
+Harness 按任务加载 `design-chisel-processor` 与 `implement-chisel-processor`。Skill 名称和内容哈希随 Design、Implementation、Review 与 Task Envelope 记录，正文不复制到用户项目。
 
 正式状态、批准和证据索引保存在 `.assistant/project.yaml`。Design 和验证摘要进入项目正式文档，Agent 原始事件、Task Envelope、结构化输出和验证副本进入项目同级 `.runtime/processor_agent/`。
 
+每个 Worker 只能通过 Task Envelope 中的 Read Manifest 读取项目。超范围访问返回 `read_scope_gap`，由 Harness 扩展范围后创建新 run。`stage2 status` 展示最近 run 的 queued、running、model completed、validation failed、applied、failed、cancelled 和 orphaned 状态。需要停止运行时使用：
+
+```powershell
+node dist\src\cli.js stage2 cancel E:\107\my_core <run-id-or-runtime-ref>
+```
+
 ### 8.1 Stage2 返回 Stage1 Architecture Rework
 
-Topology、Unit Design、Implementation 或 Verification 证明已批准 Architecture 有误时，Workspace Agent 先形成单一修正目标的 Architecture Rework Proposal。Proposal 必须包含来源、Stage1 修正目标、闭合条件、Evidence、受影响 Topology Decisions 和受影响 Units。用户确认后启动返工：
+System Design、Package Design、Implementation 或 Verification 证明已批准 Architecture 有误时，Workspace Agent 先形成单一修正目标的 Architecture Rework Proposal。Proposal 必须包含来源、Stage1 修正目标、闭合条件、Evidence、受影响 Component 和 Work Package。用户确认后启动返工：
 
 ```powershell
 $rework = @'
-{"summary":"Stage2 发现已批准 Architecture 缺少寄存器文件同拍语义。","rationale":"Unit Design 无法在现有 Contract 下闭合。","source":{"kind":"unit_design","unitId":"regfile"},"repair":{"kind":"decision","target":"S1_DEC_003"},"requiredClosure":["补齐同拍读写语义"],"evidenceSources":[{"id":"EV_USER","kind":"user_directive","locator":"S2_REWORK","claim":"用户确认该缺口属于 Stage1 Architecture，并要求正式返工。","locations":[]}],"affectedTopologyDecisions":["S2_TOP_001"],"affectedUnits":["regfile"]}
+{"summary":"Stage2 发现已批准 Architecture 缺少寄存器文件同拍语义。","rationale":"Package Design 无法在现有 Contract 下闭合。","source":{"kind":"unit_design","workPackageId":"wp_regfile"},"repair":{"kind":"decision","target":"S1_DEC_003"},"requiredClosure":["补齐同拍读写语义"],"evidenceSources":[{"id":"EV_USER","kind":"user_directive","locator":"S2_REWORK","claim":"用户确认该缺口属于 Stage1 Architecture，并要求正式返工。","locations":[]}],"affectedComponents":["regfile"],"affectedWorkPackages":["wp_regfile"]}
 '@
 node dist\src\cli.js stage2 rework-start E:\107\my_core --proposal-json $rework
 ```
 
-Harness 会冻结 Stage2、释放全部 Agent 租约并递增 `stateEpoch`。`repair.kind=decision` 进入 Decision reopen；`repair.kind=project_spec` 创建当前失败 finding，并使用 Review Correction v2。完成新的 Stage1 Research、Review、Audit 和用户批准后恢复 Stage2：
+Harness 会冻结 Stage2、释放全部 Agent assignment 并递增 workspace revision。`repair.kind=decision` 进入 Decision reopen；`repair.kind=project_spec` 创建当前失败 finding，并使用 Review Correction v2。完成新的 Stage1 Research、Review、Audit 和用户批准后恢复 Stage2：
 
 ```powershell
 node dist\src\cli.js stage2 rework-resume E:\107\my_core
 ```
 
-恢复时，Harness 使声明的 Topology Decision 及其传递依赖失效，使受影响 Unit 及其 DAG 消费者进入 `NEEDS_REALIGN`，并失效对应 Design approval、Implementation 和 Verification。旧证据只保留哈希索引。未受影响 Unit 的状态和证据继续保留。重新闭合并批准 `design/plan.md` 后，Stage2 从第一个 ready 的 `NEEDS_REALIGN` Unit 继续。
+恢复时，Harness 撤销旧 System Design approval，使受影响 Work Package 及其 DAG 消费者进入 `NEEDS_REALIGN`，并失效对应 Package Design approval、Implementation 和 Verification。旧证据只保留哈希索引。未受影响 Package 的状态和证据继续保留。重新审查并批准 `design/plan.md` 后，Stage2 从第一个 ready 的 Package 继续。
 
 ## 9. Windows 与 WSL
 
@@ -371,7 +391,7 @@ node dist\src\cli.js migrate E:\107\my_core --profile dual_issue_demo --dry-run 
 node dist\src\cli.js migrate E:\107\my_core --profile dual_issue_demo --apply --json
 ```
 
-迁移将 Intent 纳入 ProjectSpec，删除 Stage1 Module Manifest 和 `stage2Order`，把 Global Protocol 改为 Architecture Role 关系，并从 Role 重新建立 Stage2 Topology。迁移不会替用户重新批准 Architecture。完成后必须运行 `stage1 review`、独立 `stage1 audit` 和用户 `stage1 approve`；存在活动 Architecture Rework 时，再执行 `stage2 rework-resume`。
+顶层迁移将 Intent 纳入 ProjectSpec，删除 Stage1 Module Manifest 和 `stage2Order`，并把 Global Protocol 改为 Architecture Role 关系。迁移不会替用户重新批准 Architecture。完成后必须运行 `stage1 review`、独立 `stage1 audit` 和用户 `stage1 approve`。旧 Stage2 schemaVersion 3 再通过 `stage2 migrate --dry-run|--apply` 进入 System Design 流程；存在活动 Architecture Rework 时，先完成 Stage1 新批准，再执行 `stage2 rework-resume`。
 
 未批准项目可以更新到同 ID 的新 Profile：
 
@@ -403,10 +423,10 @@ node dist\src\cli.js stage1 profile-refresh E:\107\my_core --adopt-profile-defau
 4. Smoke check 失败时保留 `BLOCKED` 状态和命令输出，修复环境后重新运行 `complete`。
 5. Research Task 报告 `Codex CLI authentication unavailable` 或 `Codex CLI authentication failed` 时运行 `codex login`，登录成功后重试同一 `stage1 research` 命令。已经启动的失败运行会把原始事件保存在工作区级 `.runtime/processor_agent/`。
 6. Research Worker 或 Stage2 Worker 报告项目文件不可访问时，检查运行记录中是否存在 `server=processor_project` 的 MCP 调用。新版 Worker 在新线程和恢复线程中都通过只读 Project Reader MCP 枚举、搜索和读取文件，不依赖 Shell 命令或交互会话的 execpolicy allowlist。
-7. Topology Research 返回 `evidenceSufficient=false` 时，根据 blocker 补充项目证据或调研范围，再次运行 `stage2 plan`。Harness 会重新启动 Research Worker。已有 Evidence 充分但需要重新核对时使用 `stage2 plan ... --refresh`。
-8. Topology review 报告 owner 冲突、映射缺失或 DAG 问题时，运行 `stage2 topology-reopen` 修正对应 Decision，不直接编辑 `design/plan.md`。
-9. Stage2 Design 存在未决问题时继续与 Shadow Align 讨论并重新运行 `stage2 design`，不要手工补写 `.assistant/project.yaml`。
-10. Stage2 实现或最终验证失败时查看 `stage2 status` 中的 blocker。修复必须经过原 Active Coding 租约，随后重新执行 `implement` 或 `verify`。
+7. System Design Review 报告 Role 映射、owner、路径或 DAG 问题时，再次运行 `stage2 draft`。高风险未知项由 Agent 创建动态 DecisionRequest，用户回答后继续修订，不直接编辑 `design/plan.md`。
+8. Package Design 存在未决问题时继续与 Shadow Align 讨论。局部字段缺口由 Patch 修订，语义变化才使用带 `--instruction` 的完整 Design 重生成。不要手工补写 `.assistant/project.yaml`。
+9. Stage2 实现或最终验证失败时查看 `stage2 status` 中的 blocker 和 run 状态。修复必须经过原 Active assignment，正常恢复使用 `stage2 advance`，精确重试可以使用 `implement` 或 `verify`。
+10. schemaVersion 3 或 4 项目报告需要迁移时，先执行 `stage2 migrate --dry-run`，确认保留 Evidence 与下一动作后执行 `--apply`。
 
 Stage2 暴露已批准 Architecture 错误时使用 `stage2 rework-start`，禁止手工修改 `.assistant/`。当前版本未提供命令中断期间的多文件事务自动恢复。内容寻址 ProjectSpec history 先写新 sidecar，再原子替换状态；命令在状态替换前中断时旧状态仍可读取，可能遗留一个未引用 sidecar，需要检查后再清理。
 
@@ -421,4 +441,4 @@ node dist\src\cli.js stage1 status E:\107\dual_issue_demo
 node dist\src\cli.js stage1 next E:\107\dual_issue_demo
 ```
 
-当前 Profile 为 `0.8.0`。产品迁移已将 Stage1 升级到 schemaVersion 2、ProjectSpec history 升级到 protocolVersion 3、Stage2 升级到 schemaVersion 3，并删除旧 `architecture/modules.yaml`。Stage1 当前为 revision 144 `REVIEW_CORRECTION`，独立 Audit 要求在 `verification.requiredScenarios` 补齐 reset 释放及 drain 完成后从 `0x80000000` 重新取指的验收场景。Stage2 revision 8 保持 `S2_ARW_001` 活动并处于 `BLOCKED`，待新的 Stage1 用户批准后恢复。当前没有已确认 Unit、Unit Design 或 RTL。
+该项目使用 Stage2 schemaVersion 5。具体 revision、当前 DecisionRequest、System Design Review、Package board 和 Runtime run 以 `stage2 status` 与 `stage2 next` 的磁盘结果为准，不在指南中维护易过期的状态副本。Harness 不会把迁移前的 Topology、Unit 或 Worker 记录自动升级为新批准。

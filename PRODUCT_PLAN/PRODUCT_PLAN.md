@@ -69,8 +69,8 @@ Stage1 -> Stage2 baseline -> Stage3
 Stage3 -> Architecture Change -> Stage2 -> A/B Evaluation -> Stage3
 ```
 
-1. Stage1 一次性建立 ISA、Architecture、模块图、全局协议和项目结构。
-2. Stage2 先通过逐项用户决策闭合 Implementation Topology，再按已批准 Implementation Unit 反复完成 Design、Implementation 和 Verification，并在 Design 批准时由用户为当前 Unit 选择验证执行模式。
+1. Stage1 一次性建立目标、ISA、总体 Architecture、Architecture Role、全局协议和项目结构。
+2. Stage2 先由两个独立 Agent 形成并审查 System Design，经用户批准后按 Work Package 反复完成 Package Design、Implementation 和双 Worker Verification。
 3. Stage3 反复完成测量、诊断、优化假设、Change 创建和 A/B 评估。
 4. Architecture Change 通过影响分析选定模块，并复用 Stage2 完成实现。
 5. Verification 是 Stage2 与 Stage3 的共同门禁。
@@ -176,11 +176,11 @@ Harness Core 只依赖 `AgentRuntime` 接口。Codex 命令、认证、版本和
 
 保存可重建的机器索引：
 
-1. 稳定 Architecture Role、Implementation Unit、接口、信号和源码路径。
+1. 稳定 Architecture Role、Design Component、Interface Skeleton、Work Package、信号和源码路径。
 2. 流水级与主要数据流。
 3. 构建、测试和 elaboration 命令。
 4. Architecture、Design、源码和验证的引用关系。
-5. Stage2 Implementation Plan 中的 Role 映射、Unit DAG 与实施状态。
+5. Stage2 System Design 中的 Role 映射、Package DAG 与实施状态。
 
 Project Model 不复制源码正文，不取代用户确认的 Architecture。
 
@@ -209,9 +209,8 @@ Change Engine 管理状态转换、审批哈希、版本漂移和重开流程。
 Agent Runtime Adapter 隔离具体 Coding Agent。第一版实现 `CodexCliRuntime`。Decision 级 Research Task、独立审查和独立验证通过非交互 `codex exec` 执行，并保留以下稳定操作：
 
 ```text
-prepare
-invoke
-collect
+start
+resume
 cancel
 capabilities
 ```
@@ -219,13 +218,13 @@ capabilities
 Runtime 支持两种会话：
 
 1. Research Worker、Synthesis Worker、Static Review Worker 和 Verification Worker 使用新的短生命周期上下文，并接收结构化任务包。
-2. Stage2 的两个可恢复 Windows Codex 上下文先承担 Topology Planner，再通过 `resume` 在 Shadow Align 与 Active Coding 之间轮转。Harness 持久化线程标识、角色、Implementation Unit、租约和 state epoch，Chisel 命令由 WSL Runner 执行。
+2. Stage2 的两个可恢复 Agent 上下文先分别承担 System Design Author 与 Reviewer，System Design 批准后在 Package Design 与 Active Implementation 之间轮转。Harness assignment 只持久化 `runtimeRef`、角色、Work Package、租约、`stateEpoch` 和 Package revision。provider session ID 进入 Runtime Registry，每次调用进入独立 Run Ledger。Chisel 命令由批准的 runner 执行。
 
 Research Task 依次启动只读 Research Worker 和只读 Synthesis Worker，前者输出来源与事实 Evidence，后者只基于 Evidence 比较候选项。
 
 新 Agent 必须能够仅依靠任务包和项目文件继续工作。Harness 不转发上一 Agent 的私有对话历史。
 
-短生命周期 Worker 使用 ephemeral 会话、JSONL 事件和结构化输出 Schema。Stage2 模块 Agent 可以恢复会话，产品正确性不依赖其私有历史。上下文丢失时，新 Agent 必须能从项目文件重建同一角色和任务。
+短生命周期 Worker 使用 ephemeral 会话、JSONL 事件和结构化输出 Schema。Stage2 Package Agent 可以恢复会话，产品正确性不依赖其私有历史。上下文丢失时，新 Agent 必须能从项目文件重建同一角色和任务。
 
 面向用户的 Workspace Agent 由 `processor-agent open <path>` 启动交互式 Codex。Harness 注入固定交互协议，要求 Agent 每轮查询磁盘状态并调用结构化 Harness 命令。交互会话只负责理解自然语言和展示结果，不拥有流程状态。
 
@@ -285,12 +284,12 @@ gates
 | 阶段 | 使用的 Skill | 处理方式 |
 |---|---|---|
 | Project Blueprint | `design-chisel-processor` | 引导闭合最小架构输入 |
-| Implementation Topology | `design-chisel-processor` | 围绕当前单一 Topology Decision 调研候选并更新 Implementation Plan |
-| Baseline Design | `design-chisel-processor` | 根据已批准 Implementation Plan 生成 Unit Design 草案 |
+| System Design | `design-chisel-processor` | 从 Stage1 Architecture 形成 Component、Interface Skeleton 和 Work Package 草案，并由独立 Reviewer 审查 |
+| Package Design | `design-chisel-processor` | 根据已批准 System Design 生成 Work Package Design 草案 |
 | Baseline Implementation | `design-chisel-processor`、`implement-chisel-processor` | 根据已确认设计实现源码和测试 |
 | Change Design | `design-chisel-processor` | 追踪源码并闭合 Contract 与 Design |
 | Change Implementation | `design-chisel-processor`、`implement-chisel-processor` | 在冻结设计与允许路径内实现 |
-| Verification | `implement-chisel-processor` 中的验证规则 | Active 完成主验证，用户按 Unit 选择两个独立 Worker 或 Active 自行完成后续审查与验证 |
+| Verification | `implement-chisel-processor` 中的验证规则 | Active 完成主验证，两个独立 Worker 分别完成静态审查和完整命令验证 |
 | Timing Trace | `trace-vivado-timing-to-rtl` | 注册，第一版关闭 |
 | Timing Optimization | `optimize-chisel-fpga-timing` | 注册，第一版关闭 |
 
@@ -298,32 +297,31 @@ gates
 
 双 Agent 编排不作为独立 Skill 保留。原 `orchestrate-chisel-development` 的职责按所有权拆入产品：
 
-1. Topology Decision、Implementation Unit 状态、角色分配、租约、state epoch、审批哈希、路径权限、证据失效、重开和原子轮转由 Harness 与 Schema 强制执行。
+1. System Design、动态 DecisionRequest、Work Package 状态、角色分配、租约、`stateEpoch`、Package revision、审批哈希、路径权限、并发 claim、结果合并、证据失效、重开和原子轮转由 Harness 与 Schema 强制执行。
 2. Authority、当前角色、批准文档、允许路径、Stage Gate、证据字段和下一步动作由 Harness 写入每次 Agent Task Envelope。
-3. Implementation Plan、Unit Design、批准哈希、实现范围、验收条件和 Verification Record 构成持久交接面，不创建独立 handoff 文件。
+3. System Design、Package Design、批准哈希、实现范围、验收条件和 Verification Record 构成持久交接面，不创建独立 handoff 文件。
 4. `design-chisel-processor` 与 `implement-chisel-processor` 只保留领域方法，不承担线程身份、租约或状态转换。
 
 第一版统一使用 `.assistant/`，不使用遗产中的 `.codex/chisel-workflow/`。逐源码 `_codex.md` 规则不进入第一版项目，变更级实施记录由 Change、Design 和 Verification Record 承担。
 
 ## 6. Agent 模型
 
-用户始终面对一个 Workspace Agent。Stage2 维护两个可恢复的 Windows Codex 上下文，先由 Agent A 承担 Topology Planner，计划批准后在 Shadow Align 与 Active Coding 之间按 Implementation Unit 轮转。Stage1 Research Task 和 Stage2 可选验证使用短生命周期 Worker，不形成新的持久角色。
+用户始终面对一个 Workspace Agent。Stage2 维护两个可恢复 Agent 上下文，先由 Agent A 生成 System Design，Agent B 独立审查，批准后在 Shadow Package Design 与 Active Implementation 之间轮转。Stage1 Research Task 和 Stage2 固定双 Worker 验证使用短生命周期上下文，不形成新的持久角色。
 
 ### 6.1 Workspace Agent
 
 1. 作为唯一用户交互入口。
-2. Topology 阶段展示完整实施看板和一个当前 Topology Decision。
-3. Module Loop 展示当前状态、Design 批准包和待确认问题。
-4. 在每个 Unit 批准 Design 时，明确询问是否启动两个独立验证 Worker。
-5. 不代替用户批准 Implementation Plan、Design 或选择验证模式。
-6. 通过 Harness 查询和提交正式状态，不直接改写 `.assistant/`。
+2. System Design 阶段展示 Component、Interface、Package 看板和一个当前动态 DecisionRequest。
+3. Package Loop 展示当前状态、Design 批准包和待确认问题。
+4. 不代替用户批准 System Design、Package Design 或动态 DecisionRequest。
+5. 通过 Harness 查询和提交正式状态，不直接改写 `.assistant/`。
 
-### 6.2 Topology Planner
+### 6.2 System Design Author 与 Reviewer
 
-1. 读取已批准 Architecture、现有源码、测试和构建组织。
-2. 围绕一个当前 Topology Decision 形成候选、推荐、影响和风险。
-3. 通过 Harness 更新 `design/plan.md` 中的已确认事实和未决问题。
-4. 不一次性固化完整拓扑，不代替用户拍板。
+1. Author 读取已批准 Architecture、现有源码、测试和构建组织，形成完整 System Design 草案。
+2. Reviewer 使用独立上下文审查 Role 覆盖、状态 owner、Interface、路径所有权和 Package DAG。
+3. 两者只为高风险且无法唯一确定的问题创建动态 DecisionRequest。
+4. Reviewer 的 `pass` 不构成用户批准。
 
 ### 6.3 Shadow Align
 
@@ -334,25 +332,20 @@ gates
 
 ### 6.4 Active Coding
 
-1. 只在当前 Unit 通过 `DESIGN_CLOSED` 后获得实现租约。
+1. 只在当前 Work Package Design 通过用户批准后获得实现租约。
 2. 读取已批准 Contract、Design 和允许路径，批准后的 Design 保持只读。
 3. 只修改任务声明的源码和测试路径，完成最小实现、断言与主验证。
-4. 用户选择 `active_only` 时，执行分离的静态自审和完整验证。
-5. 发现设计缺口时提交带反例的 `DESIGN_REOPENED` 请求。
+4. 发现设计缺口时提交带反例的 `DESIGN_REOPENED` 请求。
 
 ### 6.5 验证 Worker
 
-每个 Unit 的 Design 批准包必须记录用户选择：
-
-1. `independent_workers` 创建独立 Static Review Worker 和独立 Verification Worker。两个 Worker 均无正式文件写权限，可以并行执行。
-2. `active_only` 不创建 Worker，由 Active Coding 完成静态自审和验证，证据不得声明独立性。
-3. Harness 不继承上一 Unit 的选择，也不推断默认值。
+每个 Work Package 固定创建独立 Static Review Worker 和独立 Verification Worker。两个 Worker 使用不同 provider session 和冻结副本，均无正式文件写权限。Harness 在 Verification 副本执行批准命令，并把不可变结果交给只读 Verification Worker 审查。任一 Worker 未通过时，Work Package 不能完成。
 
 ### 6.6 租约与轮转
 
-1. Shadow Align 可以闭合下一个 ready Unit 的 Design，Active Coding 可以实现当前 Unit，两者只允许写入互不相交的路径。
+1. Shadow Align 可以闭合下一个 ready Work Package 的 Design，Active Coding 可以实现当前 Package，两者只允许写入互不相交的路径。
 2. 任一路径同一时刻只有一个写入者，Harness 是状态、审批和正式证据投影的唯一写入者。
-3. 当前 Active Unit `COMPLETE` 且 Shadow Unit `DESIGN_CLOSED` 后，Harness 原子交换两个角色与租约并递增 state epoch。
+3. 当前 Active 进入 `VERIFYING` 后，独立且无 shared interface change 的 Shadow Package 可以提前晋升。存在依赖时必须等待 Active `COMPLETE`。
 4. Static Review Worker 和 Verification Worker 不参与轮转，任务结束后释放。
 
 ## 7. 生命周期总览
@@ -360,7 +353,7 @@ gates
 | 阶段 | 目标 | 完成结果 | 权威计划 |
 |---|---|---|---|
 | Stage1 | 闭合全局架构并建立项目 | 已批准的 Project Blueprint、Architecture Role、项目骨架和 Verification Plan | [STAGE1.md](./STAGE1.md) |
-| Stage2 | 逐项闭合 Implementation Topology，再逐 Unit 完成设计、实现、验证与集成 | 已批准 Implementation Plan，以及可构建、可测试并冻结的 baseline 或已完成的 Change | [STAGE2.md](./STAGE2.md) |
+| Stage2 | 批准 System Design，再逐 Work Package 完成设计、实现、验证与集成 | 已批准 System Design，以及可构建、可测试并冻结的 baseline 或已完成的 Change | [STAGE2.md](./STAGE2.md) |
 | Stage3 | 用可复现实验证明或否定优化假设 | 带 A/B 证据的接受或拒绝结论 | [STAGE3.md](./STAGE3.md) |
 
 跨阶段规则：
@@ -371,7 +364,7 @@ gates
 4. Verification 是 Stage2 和 Stage3 的共同门禁。
 5. 状态转换、审批哈希、文档引用和失败证据由 Harness 持久化。
 6. 任一 Agent 无法从项目文件恢复当前工作时，流程不能进入完成状态。
-7. Stage2 证明已批准 Architecture 有误时，必须冻结 Stage2 并通过正式 Architecture Rework 返回 Stage1。Stage1 新 approval 生效后，Harness 只失效已声明的 Topology Decision、受影响 Unit 及其传递消费者。
+7. Stage2 证明已批准 Architecture 有误时，必须冻结 Stage2 并通过正式 Architecture Rework 返回 Stage1。Stage1 新 approval 生效后，Harness 重新审查 System Design，只失效受影响 Work Package 及其传递消费者。
 
 ## 8. 用户项目结构
 
@@ -394,7 +387,7 @@ user_project/
 其余实体按首次正式内容延迟创建：
 
 1. Stage1 创建并持续更新 `research/stage1.md`，只投影正式 Decision Evidence 和结论。
-2. 首次 Stage2 Topology Decision 创建 `design/plan.md`；首次 Unit Design 创建 `design/<unit-id>.md`。Stage2 从已批准的 Architecture Role 和全局语义建立拓扑。
+2. Stage2 初始化创建 `design/plan.md`；首次 Package Design 创建 `design/packages/<work-package-id>.md`。Stage2 从已批准的 Architecture Role 和全局语义建立 System Design。
 3. 首次架构变更创建 `architecture/contracts/` 与 `architecture/decisions/`。
 4. 首次实现创建 `src/`，首次形成正式验证证据时创建 `verification/`。
 5. 首次优化创建 `experiments/`，其下分类目录也按内容创建。
@@ -421,7 +414,7 @@ processor_agent/
 ├── tsconfig.json
 ├── src/                  TypeScript 执行内核与 CLI
 │   ├── stage1/           ProjectSpec、事实来源与 Stage1 领域逻辑
-│   └── stage2/           Topology、展示、Worker Contract 与 Proposal 校验
+│   └── stage2/           System Design、Package、轮转、门禁、Runtime Port 与展示
 ├── profiles/             项目生成 Profile
 └── tests/                状态机、生成器和最小端到端测试
 ```
@@ -469,22 +462,21 @@ processor-agent stage1 complete <path>
 
 ```text
 processor-agent stage2 init <path>
-processor-agent stage2 migrate <path>
+processor-agent stage2 migrate <path> --dry-run|--apply
 processor-agent stage2 status <path>
 processor-agent stage2 next <path>
-processor-agent stage2 plan <path> [decision-id]
-processor-agent stage2 answer <path> <decision-id> <option-id>
-processor-agent stage2 custom <path> <decision-id>
-processor-agent stage2 topology-reopen <path> <decision-id> --reason <reason>
+processor-agent stage2 start <path>
+processor-agent stage2 draft <path>
+processor-agent stage2 decide <path> <decision-id> --option <option-id>
+processor-agent stage2 decide <path> <decision-id> --custom <conclusion>
 processor-agent stage2 rework-start <path> --proposal-json <json>
 processor-agent stage2 rework-resume <path>
-processor-agent stage2 review <path>
-processor-agent stage2 approve-plan <path>
-processor-agent stage2 design <path> [unit-id]
-processor-agent stage2 approve <path> <unit-id> --verification-mode <mode>
-processor-agent stage2 implement <path> [unit-id]
-processor-agent stage2 verify <path> [unit-id]
-processor-agent stage2 reopen <path> <unit-id> --reason <reason>
+processor-agent stage2 approve <path>
+processor-agent stage2 design <path> <work-package-id>
+processor-agent stage2 approve <path> <work-package-id>
+processor-agent stage2 implement <path> <work-package-id>
+processor-agent stage2 verify <path> <work-package-id>
+processor-agent stage2 reopen <path> <work-package-id> --reason <reason>
 ```
 
 完整产品后续扩展为：
@@ -535,10 +527,10 @@ Product 与 Direct Codex 从同一个冻结 commit 开始。Product 使用完整
 1. Project Blueprint 与项目生成。
 2. Project Model。
 3. Project 和 Change 状态机。
-4. Architecture Role、Stage2 Topology Decision Loop 与 Unit 开发循环。
+4. Architecture Role、Stage2 System Design 与 Work Package 开发循环。
 5. Skill Registry 与固定 Architecture Change Profile。
 6. `CodexCliRuntime` Agent Runtime Adapter。
-7. Workspace Agent、Topology Planner、可轮转的 Shadow Align 与 Active Coding，以及按 Unit 可选的两个验证 Worker。
+7. Workspace Agent、System Design Author 与 Reviewer、可轮转的 Shadow Align 与 Active Coding，以及固定的两个独立验证 Worker。
 8. 三级信息处理与架构决策审批。
 9. 路径权限、Diff 检查和确定性验证门禁。
 10. CLI 与最小本地 Web 工作台。
@@ -597,9 +589,9 @@ Product 与 Direct Codex 从同一个冻结 commit 开始。Product 使用完整
 1. 实现 `dual_issue_demo` Profile。
 2. 引导用户闭合最小 Architecture 与 Design。
 3. 建立 Research Memo、Architecture Role 和 Verification Plan。
-4. 通过逐项用户讨论确认 Implementation Unit、Interface owner、源码拓扑、DAG 和实施 wave。
-5. 批准 `design/plan.md` 并展示完整 Stage2 实施看板。
-6. 以首个 ready Unit 完成第一条 `Design -> Implementation -> Verification` tracer。
+4. 由 Agent A 形成 Component、Interface Skeleton、Work Package、源码拓扑和 DAG 草案，由 Agent B 独立审查，高风险未知项进入动态 DecisionRequest。
+5. 用户批准 `design/plan.md` 并查看完整 Stage2 实施看板。
+6. 以首个 ready Work Package 完成第一条 `Design -> Implementation -> Verification` tracer。
 7. 通过 Stage2 生成 baseline Core、测试和性能计数器。
 8. 验证并冻结 baseline commit。
 
@@ -642,15 +634,15 @@ Product 与 Direct Codex 从同一个冻结 commit 开始。Product 使用完整
 13. 清空全部 Agent 上下文后，新 Agent 可以从项目文件恢复当前 Change。
 14. 每项已实现行为都能追踪到 Design、Contract 或 baseline Architecture。
 15. 每项用户决策都能在 Contract、ADR 或 Design 中定位。
-16. 每个 Architecture Role 都能通过已批准 Implementation Plan 追踪到唯一 Implementation Unit、Design、源码和验证。
+16. 每个 Architecture Role 都能通过已批准 System Design 追踪到 Design Component、Work Package、Package Design、源码和验证。
 17. Stage3 结果包含 baseline、优化假设、对应 Change、A/B 证据和接受结论。
 18. 未安装 ChatGPT 客户端时，产品仍能完成第一版完整流程。
-19. 每个 Unit 都保存用户明确选择的 `verificationMode`，且不继承上一 Unit 选择。
-20. `independent_workers` 必须留下两个独立 Worker 的执行证据，`active_only` 不得被表述为独立验证。
-21. Implementation Topology 由多个单项用户 Decision 逐渐闭合，Agent 不能一次性提交完整拓扑并代替用户确认。
-22. Stage2 Module Loop 只能使用已批准 `design/plan.md` 中的 Unit、Interface owner、源码拓扑和 DAG。
-23. Stage2 状态必须向用户展示全部 Unit、依赖、wave、Design revision、源码归属、验证状态、Agent 角色和 blocker。
-24. Stage2 Architecture Rework 必须冻结旧租约，返回 Stage1 形成新 approval，并对受影响 Topology Decision、Unit 及传递消费者执行可审计失效。未受影响 Unit 的状态和证据不得被清空。
+19. 每个 Work Package 都必须留下两个独立 Worker 的执行证据，两者使用不同运行和冻结副本。
+20. System Design 必须由一个 Author 生成、一个独立 Reviewer 审查，并由用户整体批准。
+21. 高风险未知项必须形成动态 DecisionRequest，Agent 推荐不能代替用户确认。
+22. Stage2 Package Loop 只能使用已批准 `design/plan.md` 中的 Component、Interface、路径 owner 和 Package DAG。
+23. Stage2 状态必须向用户展示全部 Package、依赖、Design revision、源码归属、验证状态、Agent 角色和 blocker。
+24. Stage2 Architecture Rework 必须冻结旧租约，返回 Stage1 形成新 approval，并对受影响 Work Package 及传递消费者执行可审计失效。未受影响 Package 的状态和证据不得被清空。
 25. Review Correction 必须区分 findingSource 与 Evidence，按目标记录覆盖关系，并使用可重放的增量历史。v1 迁移必须支持不写状态的 dry-run。
 
 ## 15. 技术基线与剩余待定事项

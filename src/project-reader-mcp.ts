@@ -2,6 +2,13 @@ import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { extname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveWithin } from "./io.js";
+import {
+  assertReadManifestValid,
+  manifestAllowsDirectory,
+  manifestAllowsPath,
+  readScopeGap,
+} from "./stage2/read-manifest.js";
+import type { Stage2ReadManifest } from "./types.js";
 
 const DEFAULT_LIST_LIMIT = 1_000;
 const MAX_LIST_LIMIT = 5_000;
@@ -136,8 +143,17 @@ export async function listProjectFiles(
   projectRoot: string,
   path = ".",
   limit = DEFAULT_LIST_LIMIT,
+  manifest?: Stage2ReadManifest,
 ): Promise<string> {
-  const boundedLimit = boundedInteger(limit, 1, MAX_LIST_LIMIT, "limit");
+  if (manifest !== undefined && !manifestAllowsDirectory(manifest, path)) {
+    throw readScopeGap(manifest, path, "directory_not_allowed");
+  }
+  const boundedLimit = boundedInteger(
+    Math.min(limit, manifest?.maxListedFiles ?? MAX_LIST_LIMIT),
+    1,
+    MAX_LIST_LIMIT,
+    "limit",
+  );
   const result = await walkProjectFiles(projectRoot, path, boundedLimit);
   const lines = [...result.files];
   if (result.truncated) {
@@ -151,7 +167,11 @@ export async function readProjectFile(
   path: string,
   startLine = 1,
   endLine?: number,
+  manifest?: Stage2ReadManifest,
 ): Promise<string> {
+  if (manifest !== undefined && !manifestAllowsPath(manifest, path)) {
+    throw readScopeGap(manifest, path, "file_not_allowed");
+  }
   const absolute = resolveProjectPath(projectRoot, path);
   await assertRealPathWithinProject(projectRoot, absolute);
   const metadata = await stat(absolute);
@@ -179,6 +199,7 @@ export async function searchProjectText(
   projectRoot: string,
   pattern: string,
   options: { path?: string; isRegex?: boolean; maxResults?: number } = {},
+  manifest?: Stage2ReadManifest,
 ): Promise<string> {
   const normalizedPattern = pattern.trim();
   if (normalizedPattern === "" || normalizedPattern.length > 256) {
@@ -193,7 +214,22 @@ export async function searchProjectText(
   const matcher = options.isRegex === true
     ? new RegExp(normalizedPattern, "iu")
     : undefined;
-  const walk = await walkProjectFiles(projectRoot, options.path ?? ".", MAX_LIST_LIMIT);
+  if (manifest !== undefined && options.path === undefined) {
+    throw readScopeGap(manifest, ".", "search_path_required");
+  }
+  const searchPath = options.path ?? ".";
+  if (
+    manifest !== undefined
+    && !manifestAllowsPath(manifest, searchPath)
+    && !manifestAllowsDirectory(manifest, searchPath)
+  ) {
+    throw readScopeGap(manifest, searchPath, "search_scope_not_allowed");
+  }
+  const walk = await searchableFiles(
+    projectRoot,
+    searchPath,
+    Math.min(MAX_LIST_LIMIT, manifest?.maxListedFiles ?? MAX_LIST_LIMIT),
+  );
   const matches: string[] = [];
   let scannedBytes = 0;
   let byteLimitReached = false;
@@ -284,6 +320,20 @@ async function walkProjectFiles(
   return { files: files.sort(), truncated: false };
 }
 
+async function searchableFiles(
+  projectRoot: string,
+  path: string,
+  limit: number,
+): Promise<WalkResult> {
+  const absolute = resolveProjectPath(projectRoot, path);
+  await assertRealPathWithinProject(projectRoot, absolute);
+  const metadata = await stat(absolute);
+  if (metadata.isFile()) {
+    return { files: [toProjectPath(resolve(projectRoot), absolute)], truncated: false };
+  }
+  return walkProjectFiles(projectRoot, path, limit);
+}
+
 function resolveProjectPath(projectRoot: string, path: string): string {
   const normalized = path.trim() === "" ? "." : path.trim();
   if (normalized.split(/[\\/]+/u).some((segment) => EXCLUDED_DIRECTORIES.has(segment))) {
@@ -327,7 +377,11 @@ function boundedInteger(value: number, minimum: number, maximum: number, label: 
   return value;
 }
 
-async function handleToolCall(projectRoot: string, params: unknown): Promise<object> {
+async function handleToolCall(
+  projectRoot: string,
+  params: unknown,
+  manifest?: Stage2ReadManifest,
+): Promise<object> {
   if (typeof params !== "object" || params === null || Array.isArray(params)) {
     throw new Error("tools/call params must be an object");
   }
@@ -342,6 +396,7 @@ async function handleToolCall(projectRoot: string, params: unknown): Promise<obj
         projectRoot,
         optionalString(args.path) ?? ".",
         optionalNumber(args.limit) ?? DEFAULT_LIST_LIMIT,
+        manifest,
       );
       break;
     case "read_file":
@@ -350,6 +405,7 @@ async function handleToolCall(projectRoot: string, params: unknown): Promise<obj
         requiredString(args.path, "path"),
         optionalNumber(args.startLine) ?? 1,
         optionalNumber(args.endLine),
+        manifest,
       );
       break;
     case "search_text": {
@@ -363,6 +419,7 @@ async function handleToolCall(projectRoot: string, params: unknown): Promise<obj
           ...(typeof args.isRegex !== "boolean" ? {} : { isRegex: args.isRegex }),
           ...(maxResults === undefined ? {} : { maxResults }),
         },
+        manifest,
       );
       break;
     }
@@ -395,7 +452,11 @@ function sendError(id: JsonRpcRequest["id"], code: number, message: string): voi
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } })}\n`);
 }
 
-async function handleRequest(projectRoot: string, request: JsonRpcRequest): Promise<void> {
+async function handleRequest(
+  projectRoot: string,
+  request: JsonRpcRequest,
+  manifest?: Stage2ReadManifest,
+): Promise<void> {
   if (request.id === undefined) {
     return;
   }
@@ -419,7 +480,7 @@ async function handleRequest(projectRoot: string, request: JsonRpcRequest): Prom
         sendResult(request.id, { tools: PROJECT_READER_TOOLS });
         break;
       case "tools/call":
-        sendResult(request.id, await handleToolCall(projectRoot, request.params));
+        sendResult(request.id, await handleToolCall(projectRoot, request.params, manifest));
         break;
       case "resources/list":
         sendResult(request.id, { resources: [] });
@@ -443,8 +504,14 @@ async function handleRequest(projectRoot: string, request: JsonRpcRequest): Prom
   }
 }
 
-async function runServer(projectRoot: string): Promise<void> {
+async function runServer(projectRoot: string, manifestPath?: string): Promise<void> {
   await stat(resolve(projectRoot));
+  const manifest = manifestPath === undefined
+    ? undefined
+    : JSON.parse(await readFile(resolve(manifestPath), "utf8")) as Stage2ReadManifest;
+  if (manifest !== undefined) {
+    assertReadManifestValid(manifest);
+  }
   process.stdin.setEncoding("utf8");
   let buffered = "";
   for await (const chunk of process.stdin) {
@@ -455,7 +522,7 @@ async function runServer(projectRoot: string): Promise<void> {
       buffered = buffered.slice(newline + 1);
       if (line !== "") {
         const request = JSON.parse(line) as JsonRpcRequest;
-        await handleRequest(projectRoot, request);
+        await handleRequest(projectRoot, request, manifest);
       }
       newline = buffered.indexOf("\n");
     }
@@ -465,11 +532,12 @@ async function runServer(projectRoot: string): Promise<void> {
 const invokedPath = process.argv[1] === undefined ? undefined : resolve(process.argv[1]);
 if (invokedPath === fileURLToPath(import.meta.url)) {
   const projectRoot = process.argv[2];
+  const manifestPath = process.argv[3];
   if (projectRoot === undefined) {
     process.stderr.write("Project root argument is required.\n");
     process.exitCode = 1;
   } else {
-    runServer(projectRoot).catch((error: unknown) => {
+    runServer(projectRoot, manifestPath).catch((error: unknown) => {
       process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
       process.exitCode = 1;
     });

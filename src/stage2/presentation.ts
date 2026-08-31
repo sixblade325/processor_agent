@@ -8,6 +8,9 @@ import type {
   Stage2TopologyProposal,
   Stage2VerificationMode,
   Stage2WorkerEvidence,
+  Stage2PackageDesignProposal,
+  Stage2WorkPackageStateV4,
+  Stage2WorkspaceStage,
 } from "../types.js";
 
 export function renderImplementationPlanDocument(
@@ -339,6 +342,276 @@ export function renderVerificationDocument(module: Stage2ModuleState): string {
     "## 阻塞项",
     "",
     ...(module.blockers.length === 0 ? ["- 无"] : module.blockers.map((item) => `- ${item}`)),
+    "",
+    `完成时间：${verification.completedAt ?? "未完成"}`,
+  ];
+  return `${lines.join("\n").replace(/\n{3,}/gu, "\n\n").trimEnd()}\n`;
+}
+
+export function renderSystemDesignDocument(
+  state: Stage1ProjectState,
+  stage2: Stage2WorkspaceStage,
+  status: "待生成" | "待独立审查" | "待决策" | "需修订" | "待批准" | "已批准",
+): string {
+  const systemDesign = stage2.systemDesign;
+  const proposal = systemDesign.proposal;
+  const revisionRequest = systemDesign.revisionRequests?.at(-1);
+  const lines = [
+    "# Stage2 System Design",
+    "",
+    `状态：${status}`,
+    "",
+    `System Design revision：${String(systemDesign.revision)}`,
+    "",
+    `Stage2 workspace revision：${String(stage2.workspaceRevision)}`,
+    "",
+    `Architecture approval：\`${state.stage1.approval?.aggregateSha256 ?? "missing"}\``,
+    "",
+  ];
+  if (revisionRequest !== undefined) {
+    lines.push(
+      "## 当前修订请求",
+      "",
+      `Request：\`${revisionRequest.id}\``,
+      "",
+      `状态：${revisionRequest.status === "pending" ? "待应用" : "已应用"}`,
+      "",
+      `基线：System Design revision ${String(revisionRequest.baseDesignRevision)}，sha256=\`${revisionRequest.baseDocumentSha256}\``,
+      "",
+      revisionRequest.instruction,
+      "",
+    );
+  }
+  if (proposal === undefined) {
+    lines.push(
+      "## 迁移证据",
+      "",
+      ...(systemDesign.legacyEvidence.length === 0
+        ? ["- 无"]
+        : systemDesign.legacyEvidence.map((item) =>
+          `- \`${item.id}\` [${item.kind}]：${item.summary}`
+        )),
+      "",
+      "尚未生成新的 System Design Draft。",
+      "",
+    );
+    return `${lines.join("\n").trimEnd()}\n`;
+  }
+  lines.push(
+    "## 总体方案",
+    "",
+    proposal.summary,
+    "",
+    ...renderList("Architecture 引用", proposal.architectureReferences),
+    "## Design Components",
+    "",
+    "| Component | Parent | Architecture Roles | 职责 | 状态所有权 | Interfaces |",
+    "|---|---|---|---|---|---|",
+    ...proposal.components.map((component) =>
+      `| \`${component.id}\` | ${component.parentId === undefined ? "顶层" : `\`${component.parentId}\``} | ${table(component.architectureRoles.join("、") || "无")} | ${table(component.responsibility)} | ${table(component.stateOwnership.join("、") || "无")} | ${table(component.interfaceIds.join("、") || "无")} |`
+    ),
+    "",
+    "## Interface Skeletons",
+    "",
+    "| Interface | Owner | Producer | Consumer | 字段骨架 | 边界 | 时序 |",
+    "|---|---|---|---|---|---|---|",
+    ...(proposal.interfaces.length === 0
+      ? ["| 无 | | | | | | |"]
+      : proposal.interfaces.map((contract) =>
+        `| \`${contract.id}\` | \`${contract.ownerComponentId}\` | ${table(contract.producerComponentIds.join("、"))} | ${table(contract.consumerComponentIds.join("、"))} | ${table(contract.fields.join("、") || "Package Design 闭合")} | ${table(contract.boundary)} | ${table(contract.timing)} |`
+      )),
+    "",
+    "## Work Packages",
+    "",
+    "| Package | Components | Design 依赖 | 实施依赖 | 集成依赖 | Design | 源码路径 | 测试路径 | 验收 |",
+    "|---|---|---|---|---|---|---|---|---|",
+    ...proposal.workPackages.map((workPackage) =>
+      `| \`${workPackage.id}\` | ${table(workPackage.componentIds.join("、"))} | ${table(workPackage.designDependsOn.join("、") || "无")} | ${table(workPackage.implementationDependsOn.join("、") || "无")} | ${table(workPackage.integrationDependsOn.join("、") || "无")} | \`${workPackage.designPath}\` | ${table(workPackage.allowedSourcePaths.join("、"))} | ${table(workPackage.allowedTestPaths.join("、"))} | ${table(workPackage.acceptance.join("、"))} |`
+    ),
+    "",
+    ...renderList("全局不变量", proposal.globalInvariants),
+    ...renderList("整体验收计划", proposal.acceptancePlan),
+    "## Decision Requests",
+    "",
+    ...(systemDesign.decisionOrder.length === 0
+      ? ["- 无"]
+      : systemDesign.decisionOrder.flatMap((id) => {
+        const decision = systemDesign.decisions[id]!;
+        return [
+          `### \`${id}\` ${decision.status === "answered" ? "已回答" : "待回答"}`,
+          "",
+          decision.spec.question,
+          "",
+          `需要用户决定的原因：${decision.spec.whyUserDecisionIsRequired}`,
+          "",
+          `推荐：\`${decision.spec.recommendation}\``,
+          "",
+          ...(decision.resolution === undefined
+            ? decision.spec.options.map((option) =>
+              `- \`${option.id}\` ${option.label}：${option.summary}`
+            )
+            : [`结论：${decision.resolution.conclusion}`]),
+          "",
+        ];
+      })),
+    "",
+  );
+  if (systemDesign.review !== undefined) {
+    lines.push(
+      "## 独立审查",
+      "",
+      `verdict：\`${systemDesign.review.report.verdict}\``,
+      "",
+      systemDesign.review.report.summary,
+      "",
+      ...(systemDesign.review.report.findings.length === 0
+        ? ["- 无 finding"]
+        : systemDesign.review.report.findings.map((finding) =>
+          `- [${finding.severity}] ${finding.code}：${finding.message}，action=${finding.requiredAction}`
+        )),
+      "",
+    );
+  }
+  lines.push(
+    ...renderList("风险", proposal.risks),
+    "## 迁移证据",
+    "",
+    ...(systemDesign.legacyEvidence.length === 0
+      ? ["- 无"]
+      : systemDesign.legacyEvidence.map((item) =>
+        `- \`${item.id}\` [${item.kind}]：${item.summary}`
+      )),
+    "",
+  );
+  return `${lines.join("\n").replace(/\n{3,}/gu, "\n\n").trimEnd()}\n`;
+}
+
+export function renderPackageDesignDocument(
+  workPackage: Stage2WorkPackageStateV4,
+  proposal: Stage2PackageDesignProposal,
+  revision: number,
+  status: "待确认" | "已批准" | "需修订",
+  skills: Stage2SkillReference[],
+): string {
+  const lines = [
+    `# ${workPackage.id} Work Package Design`,
+    "",
+    `状态：${status}`,
+    "",
+    `Design revision：${String(revision)}`,
+    "",
+    `Work Package：\`${workPackage.id}\``,
+    "",
+    `Design Components：${proposal.componentIds.map((id) => `\`${id}\``).join("、")}`,
+    "",
+    "## 职责与范围",
+    "",
+    proposal.summary,
+    "",
+    ...renderList("Architecture 引用", proposal.architectureReferences),
+    ...renderList("源码参考", proposal.sourceReferences),
+    ...renderList("显式排除", proposal.explicitExclusions),
+    ...renderList("接口", proposal.interfaces),
+    "## 字段与所有权",
+    "",
+    "| 字段 | 语义 | 生产者 | 存储点 | 消费者 | 有效期 |",
+    "|---|---|---|---|---|---|",
+    ...proposal.fields.map((field) =>
+      `| ${table(field.name)} | ${table(field.semantics)} | ${table(field.producer)} | ${table(field.storage)} | ${table(field.consumers.join("、"))} | ${table(field.lifetime)} |`
+    ),
+    "",
+    "## 事件与优先级",
+    "",
+    ...proposal.events.flatMap((event) => [
+      `### ${event.name}`,
+      "",
+      `条件：${event.condition}`,
+      "",
+      `优先级：${event.priority}`,
+      "",
+      ...event.effects.map((effect) => `- ${effect}`),
+      "",
+    ]),
+    ...renderList("周期行为", proposal.cycleBehavior),
+    ...renderList("异常与控制路径", proposal.exceptionalBehavior),
+    ...renderList("不变量", proposal.invariants),
+    ...renderList("共享接口变化", proposal.sharedInterfaceChanges),
+    ...renderList("受影响 Work Package", proposal.affectedWorkPackages),
+    "## 实现路径",
+    "",
+    ...proposal.implementation.sourcePaths.map((path) => `- \`${path}\``),
+    "",
+    ...proposal.implementation.testPaths.map((path) => `- \`${path}\``),
+    "",
+    ...renderList("断言", proposal.acceptance.assertions),
+    ...renderList("定向测试", proposal.acceptance.directedTests),
+    ...renderList("预期结果", proposal.acceptance.expectedResults),
+    "## 验证命令",
+    "",
+    ...proposal.acceptance.commands.map((command) =>
+      `- \`${command.id}\` [${command.runner}] ${command.description}，required=${String(command.required)}`
+    ),
+    "",
+    "## Decision Requests",
+    "",
+    ...(workPackage.decisionOrder.length === 0
+      ? ["- 无"]
+      : workPackage.decisionOrder.map((id) => {
+        const decision = workPackage.decisions[id]!;
+        return `- \`${id}\` ${decision.status}：${decision.spec.question}`;
+      })),
+    "",
+    "## 方法来源",
+    "",
+    ...skills.map((skill) => `- \`${skill.id}\`：\`${skill.contentHash}\``),
+    "",
+    ...renderList("风险", proposal.risks),
+    ...renderList("未决问题", proposal.openQuestions),
+  ];
+  return `${lines.join("\n").replace(/\n{3,}/gu, "\n\n").trimEnd()}\n`;
+}
+
+export function renderPackageVerificationDocument(workPackage: Stage2WorkPackageStateV4): string {
+  const verification = workPackage.verification;
+  if (verification === undefined) {
+    throw new Error(`Work Package ${workPackage.id} has no verification record`);
+  }
+  const renderPackageWorker = (
+    title: string,
+    evidence: typeof verification.staticReview,
+  ): string[] => evidence === undefined
+    ? ["", `## ${title}`, "", "- 尚未执行"]
+    : [
+      "",
+      `## ${title}`,
+      "",
+      `- runtimeRef: \`${evidence.runtimeRef}\``,
+      `- runId: \`${evidence.runId}\``,
+      `- verdict: ${evidence.report.verdict}`,
+      `- summary: ${evidence.report.summary}`,
+      ...evidence.report.findings.map((finding) =>
+        `- [${finding.severity}] ${finding.code}：${finding.message}，action=${finding.requiredAction}`
+      ),
+    ];
+  const lines = [
+    `# ${workPackage.id} 验证记录`,
+    "",
+    `Package 状态：${workPackage.status}`,
+    "",
+    "## Active 主验证",
+    "",
+    ...renderCommandResults(verification.primaryCommands),
+    ...(verification.finalCommands === undefined
+      ? []
+      : ["", "## Harness 最终复验", "", ...renderCommandResults(verification.finalCommands)]),
+    ...renderPackageWorker("独立 Static Review", verification.staticReview),
+    ...renderPackageWorker("独立 Verification", verification.verificationReview),
+    "",
+    "## 阻塞项",
+    "",
+    ...(workPackage.blockers.length === 0
+      ? ["- 无"]
+      : workPackage.blockers.map((blocker) => `- ${blocker}`)),
     "",
     `完成时间：${verification.completedAt ?? "未完成"}`,
   ];

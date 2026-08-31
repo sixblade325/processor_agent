@@ -1,6 +1,6 @@
 # Stage2 Skill 驱动双 Agent 薄 Harness 重构计划
 
-状态：重构方向及实施前设计点已确认，尚未修改产品逻辑
+状态：历史重构基线；schemaVersion 5 的 Runtime、并发和有界调用实现以 [Stage2 有界调用与双 Agent 并发重构计划](./STAGE2_RUNTIME_AND_CONCURRENCY_REFACTOR_PLAN.md) 为准
 
 记录时间：2026-08-31
 
@@ -11,7 +11,7 @@
 3. [Stage1 与 Stage2 产品重构计划](./STAGE1_STAGE2_PRODUCT_REFACTOR_PLAN.md)
 4. [Stage1 与 Stage2 模块粒度问题记录](./STAGE1_STAGE2_MODULE_GRANULARITY_PROBLEM.md)
 
-本文记录下一轮 Stage2 产品重构的目标、目标流程、最小状态、双 Agent 轮转、Skill 接入、迁移和验收要求。本文批准前不承担正式产品事实，实施后应把最终结论同步到产品总纲和 Stage2 权威计划。
+本文记录 Stage2 产品重构的目标、目标流程、最小状态、双 Agent 轮转、Skill 接入、迁移和验收要求。已实施结论已同步到产品总纲和 Stage2 权威计划。本文继续保存实施背景、阶段任务和剩余验收项。
 
 ## 1. 结论
 
@@ -632,4 +632,4 @@ Demo 闭环后再单独设计 Generic Codex、Skill Codex 和 Processor Agent �
 5. 当前 `S2_TOP_001` 六 Unit 结论只作为候选证据和历史记录。新 System Design 重新划分 Design Component 与 Work Package，不继承旧批准。
 6. 正式 A/B 实验暂缓。当前先完成 `dual_issue_demo` 迁移、双 Agent 轮转、实现和独立验证闭环。
 
-以上六项已经由用户确认，实施时不得重新作为开放设计问题。本文仍是重构计划，尚未修改产品逻辑、权威产品文档或 `dual_issue_demo` 状态。
+以上六项已经由用户确认，不得重新作为开放设计问题。产品逻辑、权威产品文档和 `dual_issue_demo` schema 4 迁移已经完成。Demo 当前已通过 System Design 独立审查，等待用户回答 `dr_interface_contract_ownership`。System Design 批准、至少两个 Work Package 的真实轮转、Chisel 编译与独立验证仍属于后续验收项。

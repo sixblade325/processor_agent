@@ -48,10 +48,34 @@ import {
   resumeStage2ArchitectureRework,
   summarizeStage2,
 } from "./stage2.js";
+import {
+  answerStage2DecisionRequest,
+  advanceStage2Workspace,
+  cancelStage2WorkspaceRun,
+  approvePackageDesign,
+  approveSystemDesign,
+  initStage2Workspace,
+  loadStage2Workspace,
+  migrateStage2Workspace,
+  reopenPackageDesign,
+  requestSystemDesignRevision,
+  runPackageDesign,
+  runPackageImplementation,
+  runPackageVerification,
+  runSystemDesignDraft,
+  summarizeStage2Workspace,
+} from "./stage2/workflow.js";
+import {
+  resumeStage2WorkspaceArchitectureRework,
+  startStage2WorkspaceArchitectureRework,
+} from "./stage2/rework.js";
 import type {
   Stage2ArchitectureReworkProposal,
   Stage2NextAction,
   Stage2VerificationMode,
+  Stage2WorkspaceNextAction,
+  Stage2WorkspaceSummary,
+  Stage2WorkspaceArchitectureReworkProposal,
 } from "./types.js";
 
 interface ParsedArguments {
@@ -184,18 +208,52 @@ async function commandProductMigrate(args: ParsedArguments): Promise<void> {
 async function commandStage2(command: string, args: ParsedArguments): Promise<void> {
   switch (command) {
     case "init": {
-      const loaded = await initStage2(requirePositional(args, 0, "project path"));
-      printStage2Summary(await summarizeStage2(loaded));
+      assertOnlyOptions(args, []);
+      const loaded = await initStage2Workspace(requirePositional(args, 0, "project path"));
+      printStage2WorkspaceSummary(await summarizeStage2Workspace(loaded));
       break;
     }
     case "migrate": {
-      const loaded = await migrateLegacyStage2(requirePositional(args, 0, "project path"));
-      printStage2Summary(await summarizeStage2(loaded));
+      assertOnlyOptions(args, ["dry-run", "apply", "json"]);
+      const dryRun = flag(args, "dry-run");
+      const apply = flag(args, "apply");
+      if (dryRun === apply) {
+        throw new Error("Stage2 migration requires exactly one of --dry-run or --apply");
+      }
+      const report = await migrateStage2Workspace(
+        requirePositional(args, 0, "project path"),
+        apply,
+      );
+      if (flag(args, "json")) {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      } else {
+        process.stdout.write(
+          [
+            `Stage2 migration: schema ${String(report.sourceSchemaVersion)} -> ${String(report.targetSchemaVersion)}`,
+            `Revision: ${String(report.sourceRevision)} -> ${String(report.targetRevision)}`,
+            `Retained evidence: ${String(report.retainedEvidence.length)}`,
+            `Retired mechanisms: ${report.retiredMechanisms.join(", ")}`,
+            `Applied: ${String(report.applied)}`,
+            report.nextRequiredAction,
+            "",
+          ].join("\n"),
+        );
+      }
       break;
     }
     case "status": {
-      const loaded = await loadStage2(requirePositional(args, 0, "project path"));
-      const summary = await summarizeStage2(loaded);
+      assertOnlyOptions(args, ["json"]);
+      const projectPath = requirePositional(args, 0, "project path");
+      if (await usesStage2WorkspaceSchema(projectPath)) {
+        const summary = await summarizeStage2Workspace(await loadStage2Workspace(projectPath));
+        if (flag(args, "json")) {
+          process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+        } else {
+          printStage2WorkspaceSummary(summary);
+        }
+        break;
+      }
+      const summary = await summarizeStage2(await loadStage2(projectPath));
       if (flag(args, "json")) {
         process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
       } else {
@@ -204,13 +262,97 @@ async function commandStage2(command: string, args: ParsedArguments): Promise<vo
       break;
     }
     case "next": {
-      const loaded = await loadStage2(requirePositional(args, 0, "project path"));
-      const actions = (await summarizeStage2(loaded)).readyActions;
+      assertOnlyOptions(args, ["json"]);
+      const projectPath = requirePositional(args, 0, "project path");
+      if (await usesStage2WorkspaceSchema(projectPath)) {
+        const actions = (await summarizeStage2Workspace(
+          await loadStage2Workspace(projectPath),
+        )).readyActions;
+        if (flag(args, "json")) {
+          process.stdout.write(`${JSON.stringify(actions, null, 2)}\n`);
+        } else {
+          printStage2WorkspaceActions(actions);
+        }
+        break;
+      }
+      const actions = (await summarizeStage2(await loadStage2(projectPath))).readyActions;
       if (flag(args, "json")) {
         process.stdout.write(`${JSON.stringify(actions, null, 2)}\n`);
       } else {
         printStage2Actions(actions);
       }
+      break;
+    }
+    case "advance": {
+      assertOnlyOptions(args, ["json"]);
+      const report = await advanceStage2Workspace(
+        requirePositional(args, 0, "project path"),
+      );
+      if (flag(args, "json")) {
+        process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+      } else {
+        process.stdout.write(
+          [
+            `Stage2 dispatch: ${report.dispatchId}`,
+            ...report.results.map((result) =>
+              `${result.kind}/${result.workPackageId ?? "system"}: ${result.status}${result.error === undefined ? "" : `; ${result.error}`}`
+            ),
+            "",
+          ].join("\n"),
+        );
+      }
+      break;
+    }
+    case "cancel": {
+      assertOnlyOptions(args, ["json"]);
+      const result = await cancelStage2WorkspaceRun(
+        requirePositional(args, 0, "project path"),
+        requirePositional(args, 1, "run id or runtime ref"),
+      );
+      if (flag(args, "json")) {
+        process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      } else {
+        process.stdout.write(`Cancelled Stage2 run: ${result.runId}\n`);
+      }
+      break;
+    }
+    case "start":
+    case "draft": {
+      assertOnlyOptions(args, ["instruction"]);
+      const result = await runSystemDesignDraft(
+        requirePositional(args, 0, "project path"),
+        option(args, "instruction"),
+      );
+      process.stdout.write(
+        `System Design drafted and reviewed\nrunId: ${result.runId}\nruntimeRef: ${result.runtimeRef}\n`,
+      );
+      printStage2WorkspaceSummary(await summarizeStage2Workspace(result.loaded));
+      break;
+    }
+    case "revise": {
+      assertOnlyOptions(args, ["revision", "instruction"]);
+      const loaded = await requestSystemDesignRevision(
+        requirePositional(args, 0, "project path"),
+        requireNonNegativeIntegerOption(args, "revision"),
+        requireOption(args, "instruction"),
+      );
+      printStage2WorkspaceSummary(await summarizeStage2Workspace(loaded));
+      break;
+    }
+    case "decide": {
+      assertOnlyOptions(args, ["text", "note"]);
+      const optionId = args.positional[2];
+      const customConclusion = option(args, "text");
+      const loaded = await answerStage2DecisionRequest(
+        requirePositional(args, 0, "project path"),
+        requirePositional(args, 1, "DecisionRequest id"),
+        {
+          ...(optionId === undefined ? {} : { optionId }),
+          ...(customConclusion === undefined ? {} : { customConclusion }),
+          ...(option(args, "note") === undefined ? {} : { note: option(args, "note")! }),
+        },
+      );
+      printStage2WorkspaceSummary(await summarizeStage2Workspace(loaded));
       break;
     }
     case "plan": {
@@ -268,32 +410,61 @@ async function commandStage2(command: string, args: ParsedArguments): Promise<vo
     }
     case "rework-start": {
       assertOnlyOptions(args, ["proposal-json"]);
+      const projectPath = requirePositional(args, 0, "project path");
       const proposalText = requireOption(args, "proposal-json");
-      let proposal: Stage2ArchitectureReworkProposal;
+      let proposal: unknown;
       try {
-        proposal = JSON.parse(proposalText) as Stage2ArchitectureReworkProposal;
+        proposal = JSON.parse(proposalText) as unknown;
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         throw new Error(`Invalid --proposal-json: ${detail}`);
       }
+      if (await usesStage2WorkspaceSchema(projectPath)) {
+        const loaded = await startStage2WorkspaceArchitectureRework(
+          projectPath,
+          proposal as Stage2WorkspaceArchitectureReworkProposal,
+        );
+        printStage2WorkspaceSummary(await summarizeStage2Workspace(loaded));
+        break;
+      }
       const loaded = await startStage2ArchitectureRework(
-        requirePositional(args, 0, "project path"),
-        proposal,
+        projectPath,
+        proposal as Stage2ArchitectureReworkProposal,
       );
       printStage2Summary(await summarizeStage2(loaded));
       break;
     }
     case "rework-resume": {
       assertOnlyOptions(args, []);
+      const projectPath = requirePositional(args, 0, "project path");
+      if (await usesStage2WorkspaceSchema(projectPath)) {
+        const loaded = await resumeStage2WorkspaceArchitectureRework(projectPath);
+        printStage2WorkspaceSummary(await summarizeStage2Workspace(loaded));
+        break;
+      }
       const loaded = await resumeStage2ArchitectureRework(
-        requirePositional(args, 0, "project path"),
+        projectPath,
       );
       printStage2Summary(await summarizeStage2(loaded));
       break;
     }
     case "design": {
+      const projectPath = requirePositional(args, 0, "project path");
+      if (await usesStage2WorkspaceSchema(projectPath)) {
+        assertOnlyOptions(args, ["instruction"]);
+        const result = await runPackageDesign(
+          projectPath,
+          args.positional[1],
+          option(args, "instruction"),
+        );
+        process.stdout.write(
+          `Package Design drafted: ${result.output.workPackageId}\nrunId: ${result.runId}\nruntimeRef: ${result.runtimeRef}\n`,
+        );
+        printStage2WorkspaceSummary(await summarizeStage2Workspace(result.loaded));
+        break;
+      }
       const result = await runShadowDesign(
-        requirePositional(args, 0, "project path"),
+        projectPath,
         args.positional[1],
         option(args, "instruction"),
       );
@@ -304,12 +475,21 @@ async function commandStage2(command: string, args: ParsedArguments): Promise<vo
       break;
     }
     case "approve": {
+      const projectPath = requirePositional(args, 0, "project path");
+      if (await usesStage2WorkspaceSchema(projectPath)) {
+        assertOnlyOptions(args, []);
+        const loaded = args.positional[1] === undefined
+          ? await approveSystemDesign(projectPath)
+          : await approvePackageDesign(projectPath, args.positional[1]);
+        printStage2WorkspaceSummary(await summarizeStage2Workspace(loaded));
+        break;
+      }
       const mode = requireOption(args, "verification-mode");
       if (mode !== "independent_workers" && mode !== "active_only") {
         throw new Error(`Invalid --verification-mode: ${mode}`);
       }
       const loaded = await approveModuleDesign(
-        requirePositional(args, 0, "project path"),
+        projectPath,
         requirePositional(args, 1, "module id"),
         mode as Stage2VerificationMode,
       );
@@ -317,8 +497,18 @@ async function commandStage2(command: string, args: ParsedArguments): Promise<vo
       break;
     }
     case "implement": {
+      const projectPath = requirePositional(args, 0, "project path");
+      if (await usesStage2WorkspaceSchema(projectPath)) {
+        assertOnlyOptions(args, []);
+        const result = await runPackageImplementation(projectPath, args.positional[1]);
+        process.stdout.write(
+          `Package implementation processed: ${result.output.workPackageId}\nrunId: ${result.runId}\nruntimeRef: ${result.runtimeRef}\n`,
+        );
+        printStage2WorkspaceSummary(await summarizeStage2Workspace(result.loaded));
+        break;
+      }
       const result = await runActiveImplementation(
-        requirePositional(args, 0, "project path"),
+        projectPath,
         args.positional[1],
       );
       process.stdout.write(
@@ -328,16 +518,37 @@ async function commandStage2(command: string, args: ParsedArguments): Promise<vo
       break;
     }
     case "verify": {
+      const projectPath = requirePositional(args, 0, "project path");
+      if (await usesStage2WorkspaceSchema(projectPath)) {
+        assertOnlyOptions(args, []);
+        const loaded = await runPackageVerification(
+          projectPath,
+          requirePositional(args, 1, "Work Package id"),
+        );
+        printStage2WorkspaceSummary(await summarizeStage2Workspace(loaded));
+        break;
+      }
       const loaded = await runModuleVerification(
-        requirePositional(args, 0, "project path"),
+        projectPath,
         args.positional[1],
       );
       printStage2Summary(await summarizeStage2(loaded));
       break;
     }
     case "reopen": {
+      const projectPath = requirePositional(args, 0, "project path");
+      if (await usesStage2WorkspaceSchema(projectPath)) {
+        assertOnlyOptions(args, ["reason"]);
+        const loaded = await reopenPackageDesign(
+          projectPath,
+          requirePositional(args, 1, "Work Package id"),
+          requireOption(args, "reason"),
+        );
+        printStage2WorkspaceSummary(await summarizeStage2Workspace(loaded));
+        break;
+      }
       const loaded = await reopenModuleDesign(
-        requirePositional(args, 0, "project path"),
+        projectPath,
         requirePositional(args, 1, "module id"),
         requireOption(args, "reason"),
       );
@@ -734,6 +945,160 @@ function printStage2Actions(actions: Stage2NextAction[]): void {
   }
 }
 
+function printStage2WorkspaceSummary(summary: Stage2WorkspaceSummary): void {
+  process.stdout.write(
+    [
+      `Project: ${summary.projectName}`,
+      `Stage2: ${summary.status}`,
+      `Revision: ${String(summary.revision)}`,
+      `Workspace revision: ${String(summary.workspaceRevision)}`,
+      `System Design: ${summary.systemDesign.path}@${String(summary.systemDesign.revision)}, drafted=${String(summary.systemDesign.drafted)}, open Decisions=${String(summary.systemDesign.openDecisions)}, approval current=${String(summary.systemDesign.approvalCurrent)}`,
+      ...(summary.systemDesign.reviewVerdict === undefined
+        ? []
+        : [`System Design review: ${summary.systemDesign.reviewVerdict}`]),
+      ...(summary.systemDesign.revisionRequest === undefined
+        ? []
+        : [
+          `System Design revision request: ${summary.systemDesign.revisionRequest.id}, status=${summary.systemDesign.revisionRequest.status}, base=${String(summary.systemDesign.revisionRequest.baseDesignRevision)}`,
+        ]),
+      `Work Packages: ${String(summary.complete)}/${String(summary.total)} complete`,
+      ...(summary.active?.workPackageId === undefined
+        ? []
+        : [`Active: slot ${summary.active.slot}, Package ${summary.active.workPackageId}`]),
+      ...(summary.shadow?.workPackageId === undefined
+        ? []
+        : [`Shadow: slot ${summary.shadow.slot}, Package ${summary.shadow.workPackageId}`]),
+      ...(summary.currentUserGate === undefined ? [] : [`User gate: ${summary.currentUserGate}`]),
+      ...summary.nextMachineActions.map((item) => `Machine action: ${item}`),
+      ...(summary.blockers.length === 0 ? [] : summary.blockers.map((item) => `Blocker: ${item}`)),
+      ...(summary.board.length === 0
+        ? ["Board: System Design 尚未批准"]
+        : [
+          "Board:",
+          "Package | Components | DesignDeps | ImplementationDeps | IntegrationDeps | Status | Agent | Design | Source | Test | Verification | Blocker",
+          ...summary.board.map((row) => [
+            row.workPackageId,
+            row.componentIds.join(",") || "-",
+            row.designDependsOn.join(",") || "-",
+            row.implementationDependsOn.join(",") || "-",
+            row.integrationDependsOn.join(",") || "-",
+            row.status,
+            row.agentRole,
+            row.designRevision === undefined
+              ? row.designPath
+              : `${row.designPath}@${String(row.designRevision)}`,
+            row.sourcePaths.join(",") || "-",
+            row.testPaths.join(",") || "-",
+            row.verificationStatus,
+            row.blockers.join("; ") || "-",
+          ].join(" | ")),
+        ]),
+      ...(summary.runs.length === 0
+        ? []
+        : [
+          "Recent runs:",
+          ...summary.runs.map((run) =>
+            `${run.runId} | ${run.task} | ${run.status} | ${run.slot ?? "-"}/${run.workPackageId ?? "-"} | elapsed=${formatElapsed(run.startedAt, run.completedAt)} | last=${run.lastEventAt ?? "-"} | deadline=${run.deadlineAt ?? "-"} | events=${String(run.eventCount)} | pid=${run.pid === undefined ? "-" : String(run.pid)}`
+          ),
+        ]),
+    ].join("\n") + "\n",
+  );
+}
+
+function formatElapsed(startedAt: string | undefined, completedAt: string | undefined): string {
+  if (startedAt === undefined) {
+    return "-";
+  }
+  const start = Date.parse(startedAt);
+  const end = completedAt === undefined ? Date.now() : Date.parse(completedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    return "-";
+  }
+  return `${String(Math.max(0, Math.round((end - start) / 1_000)))}s`;
+}
+
+function printStage2WorkspaceActions(actions: Stage2WorkspaceNextAction[]): void {
+  if (actions.length === 0) {
+    process.stdout.write("No ready Stage2 action.\n");
+    return;
+  }
+  for (const action of actions) {
+    switch (action.kind) {
+      case "system_design_draft":
+        process.stdout.write(`System Design Draft: slot ${action.slot}\n`);
+        break;
+      case "system_design_revision":
+        process.stdout.write(
+          `System Design revision: slot ${action.slot}${action.issues.length === 0 ? "" : `\n${action.issues.map((item) => `- ${item}`).join("\n")}`}\n`,
+        );
+        break;
+      case "decision_request":
+        process.stdout.write(
+          [
+            `DecisionRequest: ${action.decision.id}`,
+            `Scope: ${action.scope}${action.workPackageId === undefined ? "" : `/${action.workPackageId}`}`,
+            action.decision.question,
+            `Reason: ${action.decision.whyUserDecisionIsRequired}`,
+            `Recommendation: ${action.decision.recommendation}`,
+            ...action.decision.options.map((item) =>
+              `- ${item.id}: ${item.label}; ${item.summary}; consequences=${item.consequences.join("; ")}`
+            ),
+          ].join("\n") + "\n",
+        );
+        break;
+      case "system_design_approval":
+        process.stdout.write(
+          `System Design approval required: ${action.path}@${String(action.revision)}, sha256=${action.documentSha256}\n`,
+        );
+        break;
+      case "package_design":
+        process.stdout.write(`Package Design: ${action.workPackageId}, slot ${action.slot}\n`);
+        break;
+      case "package_design_revision":
+        process.stdout.write(
+          `Package Design revision: ${action.workPackageId}, slot ${action.slot}\n${action.issues.map((item) => `- ${item}`).join("\n")}\n`,
+        );
+        break;
+      case "package_design_approval":
+        process.stdout.write(
+          `Package Design approval required: ${action.workPackageId}, ${action.path}, sha256=${action.designSha256}\n`,
+        );
+        break;
+      case "active_implementation":
+        process.stdout.write(`Active Implementation: ${action.workPackageId}, slot ${action.slot}\n`);
+        break;
+      case "verification":
+        process.stdout.write(`Independent Static Review and Verification: ${action.workPackageId}\n`);
+        break;
+      case "runs_in_progress":
+        process.stdout.write(`Stage2 runs in progress: ${action.runIds.join(", ")}\n`);
+        break;
+      case "waiting_for_rotation":
+        process.stdout.write(`Package ready, waiting for rotation: ${action.workPackageId}, slot ${action.slot}\n`);
+        break;
+      case "architecture_rework_stage1":
+        process.stdout.write(
+          `Architecture Rework ${action.reworkId}: complete Stage1 ${action.repairKind}:${action.repairTarget}\n`,
+        );
+        break;
+      case "architecture_rework_resume":
+        process.stdout.write(`Architecture Rework ready to resume: ${action.reworkId}\n`);
+        break;
+      case "blocked":
+        process.stdout.write(`Blocked: ${action.blockers.join("; ")}\n`);
+        break;
+      case "baseline_complete":
+        process.stdout.write("Stage2 baseline is complete.\n");
+        break;
+    }
+  }
+}
+
+async function usesStage2WorkspaceSchema(projectPath: string): Promise<boolean> {
+  const schema = (await loadStage1(projectPath)).state.stage2?.schemaVersion;
+  return schema === 4 || schema === 5;
+}
+
 function printNext(loaded: Awaited<ReturnType<typeof loadStage1>>): void {
   const action = getNextStage1Action(loaded.state, loaded.loadedProfile.profile);
   if (action === undefined) {
@@ -821,6 +1186,18 @@ function requireOption(args: ParsedArguments, name: string): string {
   return value;
 }
 
+function requireNonNegativeIntegerOption(args: ParsedArguments, name: string): number {
+  const value = requireOption(args, name);
+  if (!/^\d+$/u.test(value)) {
+    throw new Error(`--${name} must be a non-negative integer`);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`--${name} is outside the safe integer range`);
+  }
+  return parsed;
+}
+
 function flag(args: ParsedArguments, name: string): boolean {
   return option(args, name) === "true";
 }
@@ -861,22 +1238,22 @@ processor-agent stage1 commands:
 
 processor-agent stage2 commands:
   init <path>
-  migrate <path>
+  migrate <path> --dry-run|--apply [--json]
   status <path> [--json]
   next <path> [--json]
-  plan <path> [decision-id] [--instruction text] [--refresh]
-  answer <path> <decision-id> <option-id> [--note text]
-  custom <path> <decision-id> --text conclusion [--note text]
-  topology-reopen <path> <decision-id> --reason rationale
+  advance <path> [--json]
+  cancel <path> <run-id-or-runtime-ref> [--json]
+  start <path> [--instruction text]
+  draft <path> [--instruction text]
+  revise <path> --revision number --instruction text
+  decide <path> <decision-id> [option-id] [--text conclusion] [--note text]
+  approve <path> [work-package-id]
+  design <path> [work-package-id] [--instruction text]
+  implement <path> [work-package-id]
+  verify <path> <work-package-id>
+  reopen <path> <work-package-id> --reason rationale
   rework-start <path> --proposal-json json
   rework-resume <path>
-  review <path>
-  approve-plan <path>
-  design <path> [unit-id] [--instruction text]
-  approve <path> <unit-id> --verification-mode independent_workers|active_only
-  implement <path> [unit-id]
-  verify <path> [unit-id]
-  reopen <path> <unit-id> --reason rationale
 `);
 }
 

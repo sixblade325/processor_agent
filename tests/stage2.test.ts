@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { buildWorkspaceAgentPrompt } from "../src/agent-runtime.js";
+import { sha256 } from "../src/io.js";
 import { validateArchitectureRoleMapping } from "../src/stage2/topology-model.js";
 import {
   buildStage2CodexArguments,
@@ -44,6 +45,19 @@ import {
   resumeStage2ArchitectureRework,
   summarizeStage2,
 } from "../src/stage2.js";
+import { renderSystemDesignDocument } from "../src/stage2/presentation.js";
+import {
+  advanceStage2Workspace,
+  approvePackageDesign,
+  approveSystemDesign,
+  initStage2Workspace,
+  loadStage2Workspace,
+  migrateStage2Workspace,
+  requestSystemDesignRevision,
+  runPackageDesign,
+  runPackageVerification,
+  summarizeStage2Workspace,
+} from "../src/stage2/workflow.js";
 import type {
   CommandResult,
   CommandSpec,
@@ -56,6 +70,8 @@ import type {
   Stage2TaskEnvelope,
   Stage2TopologyPlanPatch,
   Stage2TopologyProposal,
+  Stage2SystemDesignProposal,
+  Stage2PackageDesignProposal,
 } from "../src/types.js";
 
 test("One Stage1 Architecture can support different legal Stage2 Unit topologies", () => {
@@ -68,6 +84,362 @@ test("One Stage1 Architecture can support different legal Stage2 Unit topologies
 
   assert.deepEqual(validateArchitectureRoleMapping(architecture, split), []);
   assert.deepEqual(validateArchitectureRoleMapping(architecture, merged), []);
+});
+
+test("Stage2 can return an unapproved System Design candidate for a recorded revision", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile"]);
+  const initialized = await initStage2Workspace(fixture.project);
+  const stage2 = initialized.state.stage2;
+  stage2.status = "SYSTEM_DESIGN_APPROVAL";
+  stage2.systemDesign.revision = 1;
+  stage2.systemDesign.proposal = workspaceSystemProposalFixture();
+  stage2.systemDesign.review = {
+    reviewedAt: "2026-08-31T00:00:00.000Z",
+    runtimeRef: "runtime-review",
+    runId: "run-review",
+    report: {
+      schemaVersion: 1,
+      systemDesignSha256: "pending",
+      verdict: "pass",
+      summary: "fixture review passed",
+      findings: [],
+      decisionRequests: [],
+    },
+  };
+  const candidate = renderSystemDesignDocument(initialized.state, stage2, "待批准");
+  stage2.systemDesign.documentSha256 = sha256(candidate);
+  stage2.systemDesign.review.report.systemDesignSha256 = stage2.systemDesign.documentSha256;
+  await writeFile(join(fixture.project, "design", "plan.md"), candidate, "utf8");
+  await saveProjectState(initialized.root, initialized.state);
+
+  await requestSystemDesignRevision(
+    fixture.project,
+    1,
+    "Issue 逻辑进入 Instruction Queue，删除独立 Issue Component。",
+  );
+  const revised = await requestSystemDesignRevision(
+    fixture.project,
+    1,
+    "1. Issue 逻辑进入 Instruction Queue。 2. 删除独立 Issue Component。",
+  );
+
+  assert.equal(revised.state.stage2.status, "SYSTEM_DESIGN_DRAFT");
+  assert.equal(revised.state.stage2.systemDesign.review, undefined);
+  assert.equal(revised.state.stage2.systemDesign.proposal?.summary, "fixture System Design");
+  assert.equal(revised.state.stage2.systemDesign.revisionRequests?.length, 1);
+  assert.equal(revised.state.stage2.systemDesign.revisionRequests?.[0]?.id, "SDR_001");
+  assert.equal(revised.state.stage2.systemDesign.revisionRequests?.[0]?.status, "pending");
+  assert.equal(
+    revised.state.stage2.systemDesign.revisionRequests?.[0]?.instruction,
+    "1. Issue 逻辑进入 Instruction Queue。 2. 删除独立 Issue Component。",
+  );
+  const summary = await summarizeStage2Workspace(revised);
+  assert.equal(summary.readyActions[0]?.kind, "system_design_revision");
+  assert.match(summary.nextMachineActions[0] ?? "", /修订 System Design/u);
+  assert.match(
+    await readFile(join(fixture.project, "design", "plan.md"), "utf8"),
+    /SDR_001[\s\S]*1\. Issue 逻辑进入 Instruction Queue/u,
+  );
+  await assert.rejects(
+    approveSystemDesign(fixture.project),
+    /not awaiting approval/u,
+  );
+});
+
+test("Stage2 approval records its authority before assigning the first Shadow", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile"]);
+  const initialized = await initStage2Workspace(fixture.project);
+  const stage2 = initialized.state.stage2;
+  stage2.status = "SYSTEM_DESIGN_APPROVAL";
+  stage2.systemDesign.revision = 1;
+  stage2.systemDesign.proposal = workspaceSystemProposalFixture();
+  stage2.systemDesign.review = {
+    reviewedAt: "2026-08-31T00:00:00.000Z",
+    runtimeRef: "runtime-review",
+    runId: "run-review",
+    report: {
+      schemaVersion: 1,
+      systemDesignSha256: "pending",
+      verdict: "pass",
+      summary: "fixture review passed",
+      findings: [],
+      decisionRequests: [],
+    },
+  };
+  const candidate = renderSystemDesignDocument(initialized.state, stage2, "待批准");
+  stage2.systemDesign.documentSha256 = sha256(candidate);
+  stage2.systemDesign.review.report.systemDesignSha256 = stage2.systemDesign.documentSha256;
+  await writeFile(join(fixture.project, "design", "plan.md"), candidate, "utf8");
+  await saveProjectState(initialized.root, initialized.state);
+
+  const approved = await approveSystemDesign(fixture.project);
+  const approval = approved.state.stage2.systemDesign.approval;
+  const shadow = approved.state.stage2.agents.A;
+
+  assert.equal(approved.state.stage2.status, "PACKAGE_LOOP");
+  assert.ok(approval);
+  assert.equal(approval.documentSha256, approved.state.stage2.systemDesign.documentSha256);
+  assert.equal(shadow.role, "shadow");
+  assert.equal(shadow.status, "assigned");
+  assert.equal(shadow.workPackageId, "wp_regfile");
+  assert.equal(shadow.designHash, approval.documentSha256);
+  assert.equal(shadow.interfaceHash, approval.interfaceSha256);
+  assert.deepEqual(shadow.allowedPaths, ["design/packages/wp_regfile.md"]);
+  assert.equal(approved.state.stage2.workPackages.wp_regfile?.status, "DESIGNING");
+
+  const persisted = await loadStage1(fixture.project);
+  assert.deepEqual(persisted.state.stage2, approved.state.stage2);
+  const approvedDocument = await readFile(join(fixture.project, "design", "plan.md"), "utf8");
+  assert.match(approvedDocument, /状态：已批准/u);
+  assert.equal(sha256(approvedDocument), approval.documentSha256);
+});
+
+test("Stage2 advance overlaps Active Implementation and Shadow Package Design", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile", "fetch"]);
+  const initialized = await initStage2Workspace(fixture.project);
+  const stage2 = initialized.state.stage2;
+  stage2.status = "SYSTEM_DESIGN_APPROVAL";
+  stage2.systemDesign.revision = 1;
+  stage2.systemDesign.proposal = parallelWorkspaceSystemProposalFixture();
+  stage2.systemDesign.review = {
+    reviewedAt: "2026-08-31T00:00:00.000Z",
+    runtimeRef: "runtime-review",
+    runId: "run-review",
+    report: {
+      schemaVersion: 1,
+      systemDesignSha256: "pending",
+      verdict: "pass",
+      summary: "parallel fixture review passed",
+      findings: [],
+      decisionRequests: [],
+    },
+  };
+  const candidate = renderSystemDesignDocument(initialized.state, stage2, "待批准");
+  stage2.systemDesign.documentSha256 = sha256(candidate);
+  stage2.systemDesign.review.report.systemDesignSha256 = stage2.systemDesign.documentSha256;
+  await writeFile(join(fixture.project, "design", "plan.md"), candidate, "utf8");
+  await saveProjectState(initialized.root, initialized.state);
+  await approveSystemDesign(fixture.project);
+
+  await runPackageDesign(fixture.project, "wp_regfile", undefined, {
+    executor: async () => ({
+      output: parallelPackageDesign("wp_regfile"),
+      events: "",
+      threadId: "thread-design-regfile",
+    }),
+  });
+  const approved = await approvePackageDesign(fixture.project, "wp_regfile");
+  const designSha256 = approved.state.stage2.workPackages.wp_regfile!.design!.approval!.designSha256;
+  assert.equal(approved.state.stage2.agents.A.role, "active");
+  assert.equal(approved.state.stage2.agents.B.role, "shadow");
+
+  let running = 0;
+  let maximumRunning = 0;
+  const starts: Record<string, number> = {};
+  const finishes: Record<string, number> = {};
+  const executor: Stage2AgentExecutor = async (call) => {
+    running += 1;
+    maximumRunning = Math.max(maximumRunning, running);
+    starts[call.task] = Date.now();
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+    finishes[call.task] = Date.now();
+    running -= 1;
+    if (call.task === "package_design") {
+      return {
+        output: parallelPackageDesign("wp_fetch"),
+        events: "",
+        threadId: "thread-design-fetch",
+      };
+    }
+    if (call.task === "package_implementation") {
+      return {
+        output: {
+          schemaVersion: 1,
+          workPackageId: "wp_regfile",
+          designSha256,
+          summary: "Implement the approved RegFile contract.",
+          files: [{
+            path: "src/main/scala/demo/RegFile.scala",
+            kind: "source",
+            baseSha256: null,
+            content: "package demo\nobject RegFile\n",
+            purpose: "RegFile implementation",
+          }],
+          notes: [],
+          designGap: null,
+        },
+        events: "",
+        threadId: "thread-implementation-regfile",
+      };
+    }
+    throw new Error(`Unexpected task ${call.task}`);
+  };
+
+  const report = await advanceStage2Workspace(fixture.project, {
+    executor,
+    commandRunner: async () => [],
+  });
+  assert.equal(maximumRunning, 2);
+  assert.ok(starts.package_design! < finishes.package_implementation!);
+  assert.ok(starts.package_implementation! < finishes.package_design!);
+  assert.deepEqual(report.results.map((result) => result.status), ["fulfilled", "fulfilled"]);
+  const loaded = await loadStage2Workspace(fixture.project);
+  assert.equal(loaded.state.stage2.workPackages.wp_regfile?.status, "VERIFYING");
+  assert.equal(loaded.state.stage2.workPackages.wp_fetch?.status, "AWAITING_APPROVAL");
+  const appliedRuns = Object.values(loaded.state.stage2.runtimeRuns)
+    .filter((run) => run.workPackageId === "wp_regfile" || run.workPackageId === "wp_fetch")
+    .filter((run) => run.status === "applied");
+  assert.equal(appliedRuns.length, 3);
+  loaded.state.stage2.workPackages.wp_regfile!.status = "IMPLEMENTING";
+  loaded.state.stage2.workPackages.wp_regfile!.blockers = [
+    "COMMAND_EXECUTION_BLOCKED: isolated Worker could not create the approved process",
+    "REVIEW_SCOPE_INCOMPLETE: approved Package directories were not readable",
+  ];
+  await saveProjectState(loaded.root, loaded.state);
+
+  const verificationCommandRoots: string[] = [];
+  let independentCommandResults: CommandResult[] = [];
+  const verificationExecutor: Stage2AgentExecutor = async (call) => {
+    assert.equal(call.sandbox, "read-only");
+    assert.ok(call.readManifest);
+    assert.ok(call.readManifest.allowedRoots.includes("src/main/scala/demo"));
+    if (call.task === "package_static_review") {
+      return {
+        output: {
+          schemaVersion: 1,
+          kind: "static",
+          workPackageId: "wp_regfile",
+          designSha256,
+          implementationAggregateSha256: loaded.state.stage2.workPackages.wp_regfile!
+            .implementation!.aggregateSha256,
+          verdict: "pass",
+          summary: "Static review passed.",
+          findings: [],
+          commandResults: [],
+        },
+        events: "",
+        threadId: "thread-static-regfile",
+      };
+    }
+    if (call.task === "package_verification") {
+      assert.match(call.prompt, /Harness Command Evidence/u);
+      return {
+        output: {
+          schemaVersion: 1,
+          kind: "verification",
+          workPackageId: "wp_regfile",
+          designSha256,
+          implementationAggregateSha256: loaded.state.stage2.workPackages.wp_regfile!
+            .implementation!.aggregateSha256,
+          verdict: "pass",
+          summary: "Independent command evidence passed.",
+          findings: [],
+          commandResults: structuredClone(independentCommandResults),
+        },
+        events: "",
+        threadId: "thread-verification-regfile",
+      };
+    }
+    throw new Error(`Unexpected verification task ${call.task}`);
+  };
+  const verified = await runPackageVerification(fixture.project, "wp_regfile", {
+    executor: verificationExecutor,
+    commandRunner: async (specs, projectRoot) => {
+      verificationCommandRoots.push(projectRoot);
+      const results = specs.map((spec): CommandResult => ({
+        id: spec.id,
+        description: spec.description,
+        runner: spec.runner,
+        command: spec.runner === "host"
+          ? [spec.command, ...(spec.args ?? [])].join(" ")
+          : spec.script ?? "",
+        required: spec.required,
+        ok: true,
+        exitCode: 0,
+        output: "ok",
+        checkedAt: "2026-08-31T00:00:00.000Z",
+      }));
+      independentCommandResults = results;
+      return results;
+    },
+  });
+  assert.equal(verified.state.stage2.workPackages.wp_regfile?.status, "COMPLETE");
+  assert.equal(verificationCommandRoots.length, 2);
+  assert.equal(resolve(verificationCommandRoots[0]!), resolve(fixture.project));
+  assert.notEqual(resolve(verificationCommandRoots[1]!), resolve(fixture.project));
+  assert.match(verificationCommandRoots[1]!, /package_verification/u);
+});
+
+test("Stage2 schema 5 migration repairs duplicate persistent roles deterministically", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile", "fetch"]);
+  const initialized = await initStage2Workspace(fixture.project);
+  const stage2 = initialized.state.stage2;
+  stage2.status = "SYSTEM_DESIGN_APPROVAL";
+  stage2.systemDesign.revision = 1;
+  stage2.systemDesign.proposal = parallelWorkspaceSystemProposalFixture();
+  stage2.systemDesign.review = {
+    reviewedAt: "2026-08-31T00:00:00.000Z",
+    runtimeRef: "runtime-review",
+    runId: "run-review",
+    report: {
+      schemaVersion: 1,
+      systemDesignSha256: "pending",
+      verdict: "pass",
+      summary: "fixture review passed",
+      findings: [],
+      decisionRequests: [],
+    },
+  };
+  const candidate = renderSystemDesignDocument(initialized.state, stage2, "待批准");
+  stage2.systemDesign.documentSha256 = sha256(candidate);
+  stage2.systemDesign.review.report.systemDesignSha256 = stage2.systemDesign.documentSha256;
+  await writeFile(join(fixture.project, "design", "plan.md"), candidate, "utf8");
+  await saveProjectState(initialized.root, initialized.state);
+  const approved = await approveSystemDesign(fixture.project);
+  approved.state.stage2.agents.B = {
+    slot: "B",
+    role: "shadow",
+    status: "working",
+    lease: "working-shadow",
+    baseRevision: approved.state.stage2.workspaceRevision,
+    workPackageId: "wp_fetch",
+    runId: "run-fetch",
+    designHash: approved.state.stage2.systemDesign.documentSha256,
+    interfaceHash: approved.state.stage2.systemDesign.approval!.interfaceSha256,
+    allowedPaths: ["design/packages/wp_fetch.md"],
+  };
+  approved.state.stage2.workPackages.wp_fetch!.status = "DESIGNING";
+  await saveProjectState(approved.root, approved.state);
+
+  const dryRun = await migrateStage2Workspace(fixture.project, false);
+  assert.deepEqual(dryRun.retiredMechanisms, ["duplicate persistent Agent roles"]);
+  await migrateStage2Workspace(fixture.project, true);
+  const normalized = await loadStage2Workspace(fixture.project);
+  assert.equal(normalized.state.stage2.agents.B.role, "shadow");
+  assert.equal(normalized.state.stage2.agents.B.status, "working");
+  assert.equal(normalized.state.stage2.agents.A.role, "idle");
+  assert.equal(normalized.state.stage2.workPackages.wp_regfile?.status, "DESIGNING");
+});
+
+test("Stage2 rejects a stale System Design revision request without changing the candidate", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile"]);
+  const initialized = await initStage2Workspace(fixture.project);
+  const stage2 = initialized.state.stage2;
+  stage2.status = "SYSTEM_DESIGN_APPROVAL";
+  stage2.systemDesign.revision = 2;
+  stage2.systemDesign.proposal = workspaceSystemProposalFixture();
+  const candidate = renderSystemDesignDocument(initialized.state, stage2, "待批准");
+  stage2.systemDesign.documentSha256 = sha256(candidate);
+  await writeFile(join(fixture.project, "design", "plan.md"), candidate, "utf8");
+  await saveProjectState(initialized.root, initialized.state);
+
+  await assert.rejects(
+    requestSystemDesignRevision(fixture.project, 1, "stale request"),
+    /revision changed/u,
+  );
+  const loaded = await loadStage1(fixture.project);
+  assert.equal(loaded.state.stage2?.schemaVersion, 5);
+  assert.equal(loaded.state.stage2?.status, "SYSTEM_DESIGN_APPROVAL");
 });
 
 test("Stage2 exposes one researched Topology Decision and projects the partial Unit board", async () => {
@@ -644,9 +1016,10 @@ test("Stage2 CLI and Workspace prompt expose the Harness workflow", async () => 
 
   const prompt = await buildWorkspaceAgentPrompt(fixture.project);
   assert.match(prompt, /processor-agent stage2 status/u);
-  assert.match(prompt, /topology_decision/u);
-  assert.match(prompt, /independent_workers/u);
-  assert.match(prompt, /不得继承上一 Unit 选择/u);
+  assert.match(prompt, /stage2 advance/u);
+  assert.match(prompt, /canonicalization/u);
+  assert.match(prompt, /Static Review Worker/u);
+  assert.match(prompt, /runtimeRef/u);
 });
 
 test("Stage2 Codex Runtime distinguishes persistent, resumed, and ephemeral sessions", () => {
@@ -999,6 +1372,154 @@ async function createCompletedStage1Fixture(
   await scaffoldStage1(project);
   await completeStage1(project);
   return { root, project, profile };
+}
+
+function workspaceSystemProposalFixture(): Stage2SystemDesignProposal {
+  return {
+    schemaVersion: 1,
+    summary: "fixture System Design",
+    architectureReferences: ["architecture/overview.md"],
+    components: [
+      {
+        id: "core",
+        architectureRoles: [],
+        responsibility: "集成",
+        stateOwnership: [],
+        interfaceIds: [],
+      },
+      {
+        id: "regfile",
+        parentId: "core",
+        architectureRoles: ["regfile"],
+        responsibility: "寄存器文件",
+        stateOwnership: ["registers"],
+        interfaceIds: [],
+      },
+    ],
+    interfaces: [],
+    workPackages: [{
+      id: "wp_regfile",
+      componentIds: ["core", "regfile"],
+      designDependsOn: [],
+      implementationDependsOn: [],
+      integrationDependsOn: [],
+      allowedSourcePaths: ["src/main/scala/demo/RegFile.scala"],
+      allowedTestPaths: ["src/test/scala/demo/RegFileSpec.scala"],
+      designPath: "design/packages/wp_regfile.md",
+      acceptance: ["RegFile contract is executable"],
+    }],
+    globalInvariants: ["x0 remains zero"],
+    acceptancePlan: ["RegFile tests pass"],
+    decisionRequests: [],
+    risks: [],
+  };
+}
+
+function parallelWorkspaceSystemProposalFixture(): Stage2SystemDesignProposal {
+  return {
+    schemaVersion: 1,
+    summary: "parallel fixture System Design",
+    architectureReferences: ["architecture/overview.md"],
+    components: [
+      {
+        id: "core",
+        architectureRoles: [],
+        responsibility: "集成",
+        stateOwnership: [],
+        interfaceIds: [],
+      },
+      {
+        id: "regfile",
+        parentId: "core",
+        architectureRoles: ["regfile"],
+        responsibility: "寄存器文件",
+        stateOwnership: ["registers"],
+        interfaceIds: [],
+      },
+      {
+        id: "fetch",
+        parentId: "core",
+        architectureRoles: ["fetch"],
+        responsibility: "取指",
+        stateOwnership: ["pc"],
+        interfaceIds: [],
+      },
+    ],
+    interfaces: [],
+    workPackages: [
+      {
+        id: "wp_regfile",
+        componentIds: ["core", "regfile"],
+        designDependsOn: [],
+        implementationDependsOn: [],
+        integrationDependsOn: [],
+        allowedSourcePaths: ["src/main/scala/demo/RegFile.scala"],
+        allowedTestPaths: ["src/test/scala/demo/RegFileSpec.scala"],
+        designPath: "design/packages/wp_regfile.md",
+        acceptance: ["RegFile contract is executable"],
+      },
+      {
+        id: "wp_fetch",
+        componentIds: ["fetch"],
+        designDependsOn: [],
+        implementationDependsOn: [],
+        integrationDependsOn: [],
+        allowedSourcePaths: ["src/main/scala/demo/Fetch.scala"],
+        allowedTestPaths: ["src/test/scala/demo/FetchSpec.scala"],
+        designPath: "design/packages/wp_fetch.md",
+        acceptance: ["Fetch contract is executable"],
+      },
+    ],
+    globalInvariants: ["x0 remains zero"],
+    acceptancePlan: ["all packages pass"],
+    decisionRequests: [],
+    risks: [],
+  };
+}
+
+function parallelPackageDesign(workPackageId: "wp_regfile" | "wp_fetch"): Stage2PackageDesignProposal {
+  const regfile = workPackageId === "wp_regfile";
+  return {
+    schemaVersion: 1,
+    workPackageId,
+    componentIds: regfile ? ["core", "regfile"] : ["fetch"],
+    summary: `${workPackageId} contract`,
+    architectureReferences: ["architecture/overview.md"],
+    sourceReferences: [],
+    explicitExclusions: [],
+    interfaces: ["approved System Design"],
+    fields: [],
+    events: [],
+    cycleBehavior: ["registered behavior"],
+    exceptionalBehavior: ["reset clears state"],
+    invariants: ["valid guards state"],
+    sharedInterfaceChanges: [],
+    affectedWorkPackages: [],
+    implementation: {
+      sourcePaths: [regfile
+        ? "src/main/scala/demo/RegFile.scala"
+        : "src/main/scala/demo/Fetch.scala"],
+      testPaths: [regfile
+        ? "src/test/scala/demo/RegFileSpec.scala"
+        : "src/test/scala/demo/FetchSpec.scala"],
+    },
+    acceptance: {
+      assertions: ["valid guards state"],
+      directedTests: ["reset and one operation"],
+      commands: [{
+        id: "node_version",
+        description: "check fixture runtime",
+        runner: "host",
+        command: "node",
+        args: ["--version"],
+        required: true,
+      }],
+      expectedResults: ["operation succeeds"],
+    },
+    decisionRequests: [],
+    risks: [],
+    openQuestions: [],
+  };
 }
 
 function stage2FixtureProfile(moduleOrder: string[]): string {

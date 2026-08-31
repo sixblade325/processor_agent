@@ -1999,7 +1999,7 @@ async function ensureProjectRules(root: string): Promise<void> {
 1. \`architecture/\` 由用户批准。Agent 可以生成草案，不能自行把草案标记为已批准。
 2. \`design/\` 由用户和 Agent 共同维护，负责把架构要求落实到模块、字段、接口、周期和验证点。
 3. \`src/\` 与 \`verification/\` 是正式项目资产。源码修改必须关联已闭合的 Design 和验收条件。
-4. 每个 Implementation Unit 只对应一份 Design。每个源码和测试路径只允许一个 Implementation Unit 拥有，路径归属由已批准 Implementation Plan 声明。
+4. 每个 Work Package 只对应一份 Package Design。每个源码和测试路径只允许一个 Work Package 拥有，路径归属由已批准 System Design 声明。
 5. \`experiments/\` 只保存可复现并经过确认的结论。
 6. \`.assistant/\` 由 Processor Agent 维护。用户和普通实现任务不得手工修改其中的状态、哈希和审批记录。
 7. 同一事实只保留一个权威正文，其他位置使用摘要和链接。
@@ -2082,16 +2082,17 @@ async function ensureProjectRules(root: string): Promise<void> {
 12. Workspace Agent 内不得递归调用 \`processor-agent open\`。
 13. Stage2 状态、Design 投影、实现写入、验证证据和角色轮转必须调用 \`processor-agent stage2 ...\`，不得手工修改 \`.assistant/project.yaml\`。
 14. Shadow Align 无源码和测试写权限。Active Coding 只能提交已批准 Design 中列出的源码和测试路径，已批准 Design 对 Active 只读。
-15. 每个模块批准 Design 时都必须由用户明确选择 \`independent_workers\` 或 \`active_only\`，不得继承其他模块的选择。
-16. \`independent_workers\` 启动独立 Static Review Worker 与 Verification Worker。\`active_only\` 的证据必须标记为非独立验证。
-17. Agent 不能根据模块名、最近修改或对话历史猜测角色。每次执行以 Harness Task Envelope 中的 role、lease、state epoch、哈希和允许路径为准。
-18. 实现发现 Design 缺口时必须运行 \`stage2 reopen\`，停止源码写入并记录反例。不得自行补充协议、状态或保守限制。
-19. 编译、主验证、静态审查和验证审查全部通过后，模块才能进入 \`COMPLETE\`。
-20. 双 Agent 轮转由 Harness 原子更新，Agent 不得直接修改自己或另一 Agent 的 assignment。
-21. Review Correction 必须提交包含 patch、rationale、evidenceSources 和 evidenceCoverage 的 Proposal。Audit report 只作为 findingSource，不能作为新值 Evidence。
-22. Stage2 暴露 Architecture 错误时必须使用 \`stage2 rework-start\` 返回 Stage1。不得通过 Unit Design、源码补丁或手工状态修改掩盖 Architecture 缺口。
-23. Architecture Rework 期间 Stage2 Agent 租约全部失效。Stage1 新 approval 后只能使用 \`stage2 rework-resume\` 恢复，并重新闭合失效 Topology Decision 和 \`NEEDS_REALIGN\` Unit。
-24. Profile refresh 保留项目覆盖字段。只有用户明确确认后才能使用 \`stage1 release-override\` 交还 Profile 管理。
+15. Stage2 先由 System Design Agent 给出全局组件、接口骨架与 Work Package 草案，经独立 Reviewer 审查和用户确认后生效。
+16. 每个 Work Package 必须依次经过 Design 批准、Active Implementation、独立 Static Review Worker 与独立 Verification Worker，两个 Worker 均通过后才能完成。
+17. Agent assignment 只保存 Harness 的 \`runtimeRef\`，外部 provider session ID 只保存在 Runtime Registry 中。
+18. Agent 不能根据模块名、最近修改或对话历史猜测角色。每次执行以 Harness Task Envelope 中的 role、lease、workspace revision、哈希和允许路径为准。
+19. 实现发现 Design 缺口时必须运行 \`stage2 reopen\`，停止源码写入并记录反例。不得自行补充协议、状态或保守限制。
+20. 编译、主验证、静态审查和验证审查全部通过后，Work Package 才能进入 \`COMPLETE\`。
+21. 双 Agent 轮转由 Harness 原子更新，Agent 不得直接修改自己或另一 Agent 的 assignment。
+22. Review Correction 必须提交包含 patch、rationale、evidenceSources 和 evidenceCoverage 的 Proposal。Audit report 只作为 findingSource，不能作为新值 Evidence。
+23. Stage2 暴露 Architecture 错误时必须使用 \`stage2 rework-start\` 返回 Stage1。不得通过 Package Design、源码补丁或手工状态修改掩盖 Architecture 缺口。
+24. Architecture Rework 期间 Stage2 Agent assignment 全部失效。Stage1 新 approval 后只能使用 \`stage2 rework-resume\` 恢复，并重新审查 System Design 和对齐 \`NEEDS_REALIGN\` Work Package。
+25. Profile refresh 保留项目覆盖字段。只有用户明确确认后才能使用 \`stage1 release-override\` 交还 Profile 管理。
 `;
   await writeNewOrSame(path, content);
 }

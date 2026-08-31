@@ -838,7 +838,7 @@ test("Dual-issue production profile generates Chinese documents and strict proje
     /ENOENT/u,
   );
   assert.match(agents, /默认使用中文撰写人类可读文档/u);
-  assert.match(agents, /每个源码和测试路径只允许一个 Implementation Unit 拥有/u);
+  assert.match(agents, /每个源码和测试路径只允许一个 Work Package 拥有/u);
   assert.match(agents, /禁止自行补协议、字段、身份保护和保守机制/u);
   assert.match(agents, /processor-agent open <path>/u);
   assert.match(agents, /不得用直接编辑替代 Harness 命令/u);

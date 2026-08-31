@@ -3602,15 +3602,25 @@ function nextPermittedAction(task: Stage2AgentTask): string {
       return "提交当前 Topology Decision 的来源化证据";
     case "topology_planning":
       return "提交当前单一 Topology Decision Packet 并等待用户确认";
+    case "system_design_draft":
+      return "提交 System Design Draft 和必要的 Decision Requests";
+    case "system_design_review":
+      return "提交只读 System Design 审查报告";
     case "shadow_design":
+    case "package_design":
       return "提交 Design 提案并等待用户批准";
+    case "package_design_patch":
+      return "提交受限 Design Patch 并等待 Harness 校验";
     case "active_implementation":
+    case "package_implementation":
       return "提交受允许路径约束的源码与测试提案";
     case "active_static_review":
     case "independent_static_review":
+    case "package_static_review":
       return "提交静态审查报告";
     case "active_verification_review":
     case "independent_verification":
+    case "package_verification":
       return "提交验证报告";
   }
 }

@@ -584,12 +584,19 @@ export type Stage2AgentRole = "planner" | "shadow" | "active" | "idle";
 export type Stage2AgentTask =
   | "topology_research"
   | "topology_planning"
+  | "system_design_draft"
+  | "system_design_review"
+  | "package_design_patch"
   | "shadow_design"
+  | "package_design"
   | "active_implementation"
+  | "package_implementation"
   | "active_static_review"
   | "active_verification_review"
   | "independent_static_review"
-  | "independent_verification";
+  | "independent_verification"
+  | "package_static_review"
+  | "package_verification";
 
 export interface Stage2SkillReference {
   id: string;
@@ -1256,6 +1263,624 @@ export interface Stage2Summary {
   architectureRework?: Stage2ArchitectureReworkRecord;
 }
 
+export type Stage2WorkspaceStatus =
+  | "SYSTEM_DESIGN_DRAFT"
+  | "SYSTEM_DESIGN_DECISIONS"
+  | "SYSTEM_DESIGN_APPROVAL"
+  | "PACKAGE_LOOP"
+  | "BASELINE_READY"
+  | "BLOCKED"
+  | "CANCELLED";
+
+export type Stage2WorkPackageStatus =
+  | "PENDING"
+  | "DESIGNING"
+  | "AWAITING_APPROVAL"
+  | "READY"
+  | "IMPLEMENTING"
+  | "VERIFYING"
+  | "COMPLETE"
+  | "NEEDS_REALIGN"
+  | "BLOCKED"
+  | "CANCELLED";
+
+export type Stage2DecisionRequestCategory =
+  | "architecture_role"
+  | "pipeline_boundary"
+  | "global_state"
+  | "identity_or_replay"
+  | "control_scope"
+  | "cross_package_interface"
+  | "engineering_tradeoff"
+  | "stage1_rework";
+
+export interface Stage2DecisionRequestOption {
+  id: string;
+  label: string;
+  summary: string;
+  consequences: string[];
+}
+
+export interface Stage2DecisionRequestSpec {
+  id: string;
+  category: Stage2DecisionRequestCategory;
+  question: string;
+  whyUserDecisionIsRequired: string;
+  options: Stage2DecisionRequestOption[];
+  recommendation: string;
+  affectedComponents: string[];
+  affectedInterfaces: string[];
+  affectedPaths: string[];
+  consequences: string[];
+}
+
+export interface Stage2DecisionRequestResolution {
+  selectedOption?: string;
+  customConclusion?: string;
+  conclusion: string;
+  note?: string;
+  answeredAt: string;
+  workspaceRevision: number;
+}
+
+export interface Stage2DecisionRequestState {
+  spec: Stage2DecisionRequestSpec;
+  status: "open" | "answered";
+  resolution?: Stage2DecisionRequestResolution;
+}
+
+export interface Stage2DesignComponent {
+  id: string;
+  parentId?: string;
+  architectureRoles: string[];
+  responsibility: string;
+  stateOwnership: string[];
+  interfaceIds: string[];
+}
+
+export interface Stage2InterfaceSkeleton {
+  id: string;
+  ownerComponentId: string;
+  producerComponentIds: string[];
+  consumerComponentIds: string[];
+  fields: string[];
+  boundary: string;
+  timing: string;
+}
+
+export interface Stage2WorkPackagePlanV4 {
+  id: string;
+  componentIds: string[];
+  dependsOn: string[];
+  allowedSourcePaths: string[];
+  allowedTestPaths: string[];
+  designPath: string;
+  acceptance: string[];
+}
+
+export interface Stage2WorkPackagePlanV5 {
+  id: string;
+  componentIds: string[];
+  designDependsOn: string[];
+  implementationDependsOn: string[];
+  integrationDependsOn: string[];
+  allowedSourcePaths: string[];
+  allowedTestPaths: string[];
+  designPath: string;
+  acceptance: string[];
+}
+
+export interface Stage2SystemDesignProposalV4
+  extends Omit<Stage2SystemDesignProposal, "workPackages"> {
+  workPackages: Stage2WorkPackagePlanV4[];
+}
+
+export interface Stage2SystemDesignProposal {
+  schemaVersion: 1;
+  summary: string;
+  architectureReferences: string[];
+  components: Stage2DesignComponent[];
+  interfaces: Stage2InterfaceSkeleton[];
+  workPackages: Stage2WorkPackagePlanV5[];
+  globalInvariants: string[];
+  acceptancePlan: string[];
+  decisionRequests: Stage2DecisionRequestSpec[];
+  risks: string[];
+}
+
+export interface Stage2SystemDesignReviewReport {
+  schemaVersion: 1;
+  systemDesignSha256: string;
+  verdict: "pass" | "fail";
+  summary: string;
+  findings: Stage2ReviewFinding[];
+  decisionRequests: Stage2DecisionRequestSpec[];
+}
+
+export interface Stage2SystemDesignReviewRecord {
+  reviewedAt: string;
+  runtimeRef: string;
+  runId: string;
+  report: Stage2SystemDesignReviewReport;
+}
+
+export interface Stage2SystemDesignApprovalV4 {
+  approvedAt: string;
+  designRevision: number;
+  documentSha256: string;
+  architectureHashes: Record<string, string>;
+  componentTopologySha256: string;
+  interfaceSha256: string;
+  workPackagePlanSha256: string;
+}
+
+export interface Stage2SystemDesignRevisionRequest {
+  id: string;
+  requestedAt: string;
+  baseDesignRevision: number;
+  baseDocumentSha256: string;
+  instruction: string;
+  status: "pending" | "applied";
+  appliedDesignRevision?: number;
+  appliedProposalSha256?: string;
+}
+
+export interface Stage2LegacyEvidence {
+  id: string;
+  kind: "topology_decision" | "topology_plan" | "worker_run" | "architecture_rework";
+  summary: string;
+  sourceRevision: number;
+  contentSha256?: string;
+  runId?: string;
+}
+
+export interface Stage2SystemDesignState {
+  path: "design/plan.md";
+  revision: number;
+  documentSha256: string;
+  draftedAt?: string;
+  runtimeRef?: string;
+  reviewRuntimeRef?: string;
+  runId?: string;
+  proposal?: Stage2SystemDesignProposal;
+  review?: Stage2SystemDesignReviewRecord;
+  approval?: Stage2SystemDesignApprovalV4;
+  decisionOrder: string[];
+  decisions: Record<string, Stage2DecisionRequestState>;
+  legacyEvidence: Stage2LegacyEvidence[];
+  revisionRequests?: Stage2SystemDesignRevisionRequest[];
+}
+
+export interface Stage2PackageDesignProposal {
+  schemaVersion: 1;
+  workPackageId: string;
+  componentIds: string[];
+  summary: string;
+  architectureReferences: string[];
+  sourceReferences: string[];
+  explicitExclusions: string[];
+  interfaces: string[];
+  fields: Stage2DesignField[];
+  events: Stage2DesignEvent[];
+  cycleBehavior: string[];
+  exceptionalBehavior: string[];
+  invariants: string[];
+  sharedInterfaceChanges: string[];
+  affectedWorkPackages: string[];
+  implementation: {
+    sourcePaths: string[];
+    testPaths: string[];
+  };
+  acceptance: {
+    assertions: string[];
+    directedTests: string[];
+    commands: CommandSpec[];
+    expectedResults: string[];
+  };
+  decisionRequests: Stage2DecisionRequestSpec[];
+  risks: string[];
+  openQuestions: string[];
+}
+
+export interface Stage2PackageDesignApproval {
+  approvedAt: string;
+  designRevision: number;
+  designSha256: string;
+  systemDesignSha256: string;
+  interfaceSha256: string;
+  architectureHashes: Record<string, string>;
+}
+
+export interface Stage2PackageDesignRecord {
+  revision: number;
+  draftedAt: string;
+  path: string;
+  documentSha256: string;
+  runtimeRef: string;
+  runId: string;
+  skills: Stage2SkillReference[];
+  proposal: Stage2PackageDesignProposal;
+  approval?: Stage2PackageDesignApproval;
+}
+
+export interface Stage2PackageImplementationProposal {
+  schemaVersion: 1;
+  workPackageId: string;
+  designSha256: string;
+  summary: string;
+  files: Stage2ImplementationFile[];
+  notes: string[];
+  designGap: Stage2DesignGap | null;
+}
+
+export interface Stage2PackageImplementationRecord {
+  appliedAt: string;
+  designSha256: string;
+  aggregateSha256: string;
+  fileHashes: Record<string, string>;
+  changedPaths: string[];
+  summary: string;
+  runtimeRef: string;
+  runId: string;
+  skills: Stage2SkillReference[];
+}
+
+export interface Stage2PackageReviewReport {
+  schemaVersion: 1;
+  kind: "static" | "verification";
+  workPackageId: string;
+  designSha256: string;
+  implementationAggregateSha256: string;
+  verdict: "pass" | "fail";
+  summary: string;
+  findings: Stage2ReviewFinding[];
+  commandResults: CommandResult[];
+}
+
+export interface Stage2PackageWorkerEvidence {
+  task: "package_static_review" | "package_verification";
+  runtimeRef: string;
+  runId: string;
+  completedAt: string;
+  skills: Stage2SkillReference[];
+  report: Stage2PackageReviewReport;
+}
+
+export interface Stage2PackageVerificationRecord {
+  primaryRanAt: string;
+  primaryCommands: CommandResult[];
+  finalCommands?: CommandResult[];
+  staticReview?: Stage2PackageWorkerEvidence;
+  verificationReview?: Stage2PackageWorkerEvidence;
+  documentPath: string;
+  documentSha256?: string;
+  completedAt?: string;
+}
+
+export interface Stage2WorkPackageStateV4 {
+  id: string;
+  order: number;
+  revision: number;
+  status: Stage2WorkPackageStatus;
+  plan: Stage2WorkPackagePlanV5;
+  design?: Stage2PackageDesignRecord;
+  implementation?: Stage2PackageImplementationRecord;
+  verification?: Stage2PackageVerificationRecord;
+  decisionOrder: string[];
+  decisions: Record<string, Stage2DecisionRequestState>;
+  blockers: string[];
+  reopened: Array<{
+    at: string;
+    reason: string;
+    previousDesignSha256?: string;
+  }>;
+}
+
+export interface Stage2WorkspaceAgentAssignment {
+  slot: Stage2AgentSlot;
+  role: "idle" | "shadow" | "active";
+  status: "idle" | "assigned" | "working" | "waiting" | "blocked";
+  lease: string;
+  baseRevision: number;
+  workPackageId?: string;
+  runtimeRef?: string;
+  runId?: string;
+  designHash?: string;
+  interfaceHash?: string;
+  allowedPaths: string[];
+}
+
+export interface Stage2RuntimeRegistryEntry {
+  runtimeRef: string;
+  provider: string;
+  model?: string;
+  runtimeVersion?: string;
+  externalSessionId?: string;
+  phase: "system_design" | "package" | "verification" | "legacy";
+  status: "active" | "idle" | "failed" | "cancelled";
+  latestRunId?: string;
+  runCount: number;
+  cumulativePromptBytes: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type Stage2RuntimeRunStatus =
+  | "queued"
+  | "running"
+  | "model_completed"
+  | "validation_failed"
+  | "applied"
+  | "failed"
+  | "cancelled"
+  | "orphaned";
+
+export interface Stage2RuntimeRunRecord {
+  runId: string;
+  runtimeRef: string;
+  task: Stage2AgentTask;
+  slot?: Stage2AgentSlot;
+  workPackageId?: string;
+  status: Stage2RuntimeRunStatus;
+  promptDigest: string;
+  inputArtifactHashes: Record<string, string>;
+  outputArtifactHashes: Record<string, string>;
+  toolPolicy: "read-only" | "workspace-write";
+  runtimePath: string;
+  startedAt?: string;
+  lastEventAt?: string;
+  deadlineAt?: string;
+  noEventTimeoutMs?: number;
+  completedAt?: string;
+  eventCount: number;
+  pid?: number;
+  error?: string;
+}
+
+export interface Stage2ReadManifest {
+  entryFiles: string[];
+  allowedRoots: string[];
+  excludedRoots: string[];
+  affectedIds: string[];
+  maxListedFiles: number;
+  manifestSha256: string;
+}
+
+export type Stage2DesignRepairClass = "canonical" | "local_patch" | "full_redraft";
+
+export interface Stage2DesignRevisionIssue {
+  code: string;
+  target: string;
+  message: string;
+  repairClass: Stage2DesignRepairClass;
+}
+
+export interface Stage2DesignPatchOperation {
+  op: "add" | "replace" | "remove";
+  target: string;
+  value?: unknown;
+}
+
+export interface Stage2DesignPatch {
+  baseProposalSha256: string;
+  operations: Stage2DesignPatchOperation[];
+}
+
+export interface Stage2WorkspaceHistoryEvent {
+  at: string;
+  revision: number;
+  workspaceRevision: number;
+  event: string;
+  workPackageId?: string;
+  detail?: string;
+}
+
+export interface Stage2WorkspaceMigrationRecord {
+  migratedAt: string;
+  sourceSchemaVersion: number;
+  sourceRevision: number;
+  sourceStatus: string;
+  sourcePlanSha256?: string;
+  retainedEvidenceIds: string[];
+}
+
+export interface Stage2WorkspaceArchitectureReworkProposal {
+  summary: string;
+  rationale: string;
+  source: {
+    kind: Stage2ArchitectureReworkSourceKind;
+    decisionId?: string;
+    workPackageId?: string;
+  };
+  repair: {
+    kind: "decision" | "project_spec";
+    target: string;
+  };
+  requiredClosure: string[];
+  evidenceSources: ReviewCorrectionEvidenceSource[];
+  affectedComponents: string[];
+  affectedWorkPackages: string[];
+}
+
+export interface Stage2WorkspaceArchitectureReworkRecord
+  extends Stage2WorkspaceArchitectureReworkProposal {
+  id: string;
+  status: "stage1_rework" | "stage1_reapproved" | "system_design_rework" | "resumed";
+  startedAt: string;
+  updatedAt: string;
+  baseline: {
+    stage1ApprovalSha256: string;
+    stage2Revision: number;
+    workspaceRevision: number;
+    systemDesignSha256: string;
+    interfaceSha256?: string;
+    workPackageDesignHashes: Record<string, string>;
+  };
+  suspendedAssignments: Stage2WorkspaceAgentAssignment[];
+  invalidatedWorkPackages: Array<{
+    workPackageId: string;
+    designSha256?: string;
+    implementationSha256?: string;
+    verificationSha256?: string;
+  }>;
+  newStage1ApprovalSha256?: string;
+  resumedAt?: string;
+}
+
+export interface Stage2WorkspaceStage {
+  schemaVersion: 5;
+  status: Stage2WorkspaceStatus;
+  revision: number;
+  workspaceRevision: number;
+  stateEpoch: number;
+  initializedAt: string;
+  updatedAt: string;
+  systemDesign: Stage2SystemDesignState;
+  workPackageOrder: string[];
+  workPackages: Record<string, Stage2WorkPackageStateV4>;
+  agents: Record<Stage2AgentSlot, Stage2WorkspaceAgentAssignment>;
+  runtimeRegistry: Record<string, Stage2RuntimeRegistryEntry>;
+  runtimeRuns: Record<string, Stage2RuntimeRunRecord>;
+  migration?: Stage2WorkspaceMigrationRecord;
+  architectureRework?: Stage2WorkspaceArchitectureReworkRecord;
+  architectureReworkHistory?: Stage2WorkspaceArchitectureReworkRecord[];
+  blockers: string[];
+  history: Stage2WorkspaceHistoryEvent[];
+}
+
+export interface Stage2WorkspaceTaskEnvelope {
+  schemaVersion: 5;
+  task: Stage2AgentTask;
+  project: {
+    name: string;
+    root: string;
+  };
+  systemDesign: {
+    path: string;
+    revision: number;
+    documentSha256: string;
+    architectureRoles: ArchitectureRoleSpec[];
+    legacyEvidence: Stage2LegacyEvidence[];
+    resolvedDecisions: Array<{
+      id: string;
+      conclusion: string;
+    }>;
+    proposal?: Stage2SystemDesignProposal;
+    revisionRequest?: Stage2SystemDesignRevisionRequest;
+  };
+  workPackage?: {
+    plan: Stage2WorkPackagePlanV5;
+    componentContext: Stage2DesignComponent[];
+    interfaceContext: Stage2InterfaceSkeleton[];
+    upstreamDesigns: Array<{
+      workPackageId: string;
+      path: string;
+      designSha256: string;
+    }>;
+    resolvedDecisions: Array<{
+      id: string;
+      conclusion: string;
+    }>;
+  };
+  assignment: {
+    slot: Stage2AgentSlot;
+    role: "idle" | "shadow" | "active";
+    lease: string;
+    workspaceRevision: number;
+    stateEpoch: number;
+    workPackageRevision?: number;
+    runtimeRef?: string;
+  };
+  authority: {
+    repositoryRules: string;
+    architectureHashes: Record<string, string>;
+    systemDesignSha256?: string;
+    interfaceSha256?: string;
+    packageDesignPath?: string;
+    packageDesignSha256?: string;
+  };
+  skills: Stage2SkillReference[];
+  readManifest: Stage2ReadManifest;
+  allowedPaths: string[];
+  explicitExclusions: string[];
+  nextPermittedAction: string;
+}
+
+export type Stage2WorkspaceNextAction =
+  | { kind: "system_design_draft"; slot: Stage2AgentSlot }
+  | { kind: "system_design_revision"; slot: Stage2AgentSlot; issues: string[] }
+  | { kind: "decision_request"; scope: "system" | "package"; workPackageId?: string; decision: Stage2DecisionRequestSpec }
+  | { kind: "system_design_approval"; path: string; revision: number; documentSha256: string }
+  | { kind: "package_design"; workPackageId: string; slot: Stage2AgentSlot }
+  | { kind: "package_design_revision"; workPackageId: string; slot: Stage2AgentSlot; issues: string[] }
+  | { kind: "package_design_approval"; workPackageId: string; path: string; designSha256: string }
+  | { kind: "active_implementation"; workPackageId: string; slot: Stage2AgentSlot }
+  | { kind: "verification"; workPackageId: string }
+  | { kind: "runs_in_progress"; runIds: string[] }
+  | { kind: "waiting_for_rotation"; workPackageId: string; slot: Stage2AgentSlot }
+  | { kind: "architecture_rework_stage1"; reworkId: string; repairKind: "decision" | "project_spec"; repairTarget: string }
+  | { kind: "architecture_rework_resume"; reworkId: string }
+  | { kind: "blocked"; blockers: string[] }
+  | { kind: "baseline_complete" };
+
+export interface Stage2WorkspaceSummary {
+  projectName: string;
+  schemaVersion: 5;
+  status: Stage2WorkspaceStatus;
+  revision: number;
+  workspaceRevision: number;
+  complete: number;
+  total: number;
+  active?: Stage2WorkspaceAgentAssignment;
+  shadow?: Stage2WorkspaceAgentAssignment;
+  readyActions: Stage2WorkspaceNextAction[];
+  blockers: string[];
+  systemDesign: {
+    path: string;
+    revision: number;
+    drafted: boolean;
+    reviewVerdict?: "pass" | "fail";
+    openDecisions: number;
+    approvalCurrent: boolean;
+    revisionRequest?: Stage2SystemDesignRevisionRequest;
+  };
+  board: Array<{
+    workPackageId: string;
+    componentIds: string[];
+    designDependsOn: string[];
+    implementationDependsOn: string[];
+    integrationDependsOn: string[];
+    status: Stage2WorkPackageStatus | "PLANNED";
+    agentRole: "idle" | "shadow" | "active";
+    designRevision?: number;
+    designPath: string;
+    sourcePaths: string[];
+    testPaths: string[];
+    verificationStatus: "not_started" | "primary_pending" | "workers_pending" | "complete";
+    blockers: string[];
+  }>;
+  runs: Array<{
+    runId: string;
+    runtimeRef: string;
+    task: Stage2AgentTask;
+    status: Stage2RuntimeRunStatus;
+    workPackageId?: string;
+    slot?: Stage2AgentSlot;
+    startedAt?: string;
+    lastEventAt?: string;
+    deadlineAt?: string;
+    noEventTimeoutMs?: number;
+    completedAt?: string;
+    eventCount: number;
+    pid?: number;
+    runtimePath: string;
+    error?: string;
+  }>;
+  currentUserGate?: string;
+  nextMachineActions: string[];
+  architectureRework?: Stage2WorkspaceArchitectureReworkRecord;
+}
+
 export interface Stage1ProjectState {
   schemaVersion: number;
   project: {
@@ -1294,7 +1919,43 @@ export interface Stage1ProjectState {
     blockers: string[];
     history: HistoryEvent[];
   };
-  stage2?: Stage2ProjectStage | Stage2LegacyProjectStage;
+  stage2?: Stage2ProjectStage | Stage2LegacyProjectStage | Stage2WorkspaceStage | Stage2WorkspaceStageV4;
+}
+
+export interface Stage2WorkPackageStateLegacyV4
+  extends Omit<Stage2WorkPackageStateV4, "revision" | "plan"> {
+  plan: Stage2WorkPackagePlanV4;
+}
+
+export interface Stage2WorkspaceStageV4
+  extends Omit<
+    Stage2WorkspaceStage,
+    "schemaVersion" | "stateEpoch" | "systemDesign" | "workPackages" | "runtimeRegistry" | "runtimeRuns"
+  > {
+  schemaVersion: 4;
+  systemDesign: Omit<Stage2SystemDesignState, "proposal"> & {
+    proposal?: Stage2SystemDesignProposalV4;
+  };
+  workPackages: Record<string, Stage2WorkPackageStateLegacyV4>;
+  runtimeRegistry: Record<string, LegacyStage2RuntimeRegistryEntry>;
+}
+
+export interface LegacyStage2RuntimeRegistryEntry {
+  runtimeRef: string;
+  provider: string;
+  model?: string;
+  runtimeVersion?: string;
+  task: Stage2AgentTask;
+  slot?: Stage2AgentSlot;
+  workPackageId?: string;
+  externalSessionId?: string;
+  promptDigest: string;
+  inputArtifactHashes: Record<string, string>;
+  outputArtifactHashes: Record<string, string>;
+  toolPolicy: "read-only" | "workspace-write";
+  status: "running" | "completed" | "failed" | "cancelled";
+  startedAt: string;
+  completedAt?: string;
 }
 
 export interface InitOptions {

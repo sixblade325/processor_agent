@@ -240,7 +240,7 @@ async function prepareWorkspaceAgent(projectPath: string): Promise<{ root: strin
 1. 运行 \`processor-agent stage1 status . --json\` 获取磁盘中的当前状态。
 2. 运行 \`processor-agent stage1 next . --json\` 获取当前唯一待处理决策。
 3. 根据 next 的 kind 执行唯一当前动作。kind=research_required 时先运行 Research Task；kind=decision_ready 时展示一个待确认决策；kind=review_finding 时展示一个审查缺口和对应修正入口；kind=audit_refresh_required 时重新运行 audit。
-4. Stage1 为 STAGE1_COMPLETE 时检查 Stage2。Stage2 已初始化则运行 \`processor-agent stage2 status . --json\` 和 \`processor-agent stage2 next . --json\`；尚未初始化则等待用户明确要求开始 Stage2 后运行 \`processor-agent stage2 init .\`。初始化只创建 Implementation Topology Decision Loop，不直接启动 Unit Design。
+4. Stage1 为 STAGE1_COMPLETE 时检查 Stage2。Stage2 已初始化则运行 \`processor-agent stage2 status . --json\` 和 \`processor-agent stage2 next . --json\`；尚未初始化则等待用户明确要求开始 Stage2 后运行 \`processor-agent stage2 init .\`。初始化创建 System Design 工作区，不直接生成或批准 Design。
 
 交互协议：
 1. Harness 是工作流状态、生成文档、审批哈希和阶段转换的唯一写入者。不得手工修改 \`.assistant/\`，不得直接改写 Harness 管理的 Stage1 正式草案。
@@ -272,19 +272,19 @@ async function prepareWorkspaceAgent(projectPath: string): Promise<{ root: strin
 7. Correction 应用后只报告 Correction ID、changed targets、更新的正式文档、Stage1 revision 和下一个 action。不得回显已经提交的 Proposal。
 
 Stage2 交互协议：
-1. 每次处理 Stage2 用户回复前重新运行 \`stage2 status . --json\` 和 \`stage2 next . --json\`。每次都向用户同步 plan revision、Decision 进度、完整 Unit 看板、当前用户门禁和下一机器动作。
-2. kind=topology_planning 时自动运行 \`processor-agent stage2 plan . <decision-id>\`。required 调研由独立 Research Worker 先产生证据，Topology Planner 只基于证据形成当前一个 Decision Packet。Workspace Agent 不在主上下文自行完成正式调研。用户要求补充或重做调研时，将关注点放入 \`--instruction\` 并使用 \`--refresh\` 强制新 Research 运行。
-3. kind=topology_decision 时只展示当前 Decision 的事实、证据、候选、推荐、成本、风险和影响。用户选择 option 后运行 \`stage2 answer . <decision-id> <option-id>\`；用户给出唯一的自定义结论时运行 \`stage2 custom . <decision-id> --text <结论>\`。推荐不构成用户批准。
-4. 用户修正已确认的 Topology Decision 时运行 \`stage2 topology-reopen . <decision-id> --reason <原因>\`。Harness 保留旧结论，使全部传递依赖 Decision 失效，并重建当前 Plan。
-5. kind=topology_review 且 issues 为空时自动运行 \`stage2 review .\`。审查通过后展示 \`design/plan.md\`、Unit 映射、Interface owner、路径 owner、DAG、wave、完成条件和风险。只有用户明确批准当前 Plan 后才运行 \`stage2 approve-plan .\`。
-6. kind=shadow_design 时运行 \`processor-agent stage2 design . <unit-id>\`。Shadow Agent 只读调研并形成 \`design/<unit-id>.md\` 草案，不得由 Workspace Agent 直接代写正式 Design。
-7. kind=design_revision 时向用户展示 Design 路径和 issues，逐项讨论后使用 \`stage2 design . <unit-id> --instruction <修订要求>\` 继续闭合。kind=design_approval 时展示 Design revision、实现路径、验收命令和风险。
-8. Design 批准必须同时询问：“本 Unit 是否启用独立 Static Review Worker 与独立 Verification Worker？”只有用户明确批准并选择 \`independent_workers\` 或 \`active_only\` 后才运行 \`stage2 approve . <unit-id> --verification-mode <mode>\`。不得继承上一 Unit 选择。
-9. kind=active_implementation 时运行 \`stage2 implement . <unit-id>\`。kind=verification 时运行 \`stage2 verify . <unit-id>\`。用户修正已批准 Design 或实现暴露缺口时运行 \`stage2 reopen . <unit-id> --reason <原因>\`。不得直接修改 Design、源码或 \`.assistant/\` 绕过 Harness。
-10. Stage2 发现已批准 Architecture 错误时，不得通过 \`stage2 reopen\` 或直接改 Design 掩盖。先形成单一 repair target 的 Architecture Rework Proposal，包含 summary、rationale、source、repair、requiredClosure、evidenceSources、affectedTopologyDecisions 和 affectedUnits。向用户展示返工范围和失效影响，得到明确确认后运行 \`stage2 rework-start . --proposal-json <json>\`。
-11. kind=architecture_rework_stage1 时转入当前 Stage1 next 动作，按 Decision reopen 或 Review Correction v2 完成 Research、Review、Audit 和用户 Approval。Stage1 新 approval 当前有效后，kind=architecture_rework_resume 时自动运行 \`stage2 rework-resume .\`，再展示失效的 Topology Decisions、Unit 和旧证据哈希。
-12. Architecture Rework 返回后，只重新闭合 Harness 标记失效的 Topology Decisions 和 \`NEEDS_REALIGN\` Units。未受影响 Unit 的正式状态和证据继续保留。Unit ID、路径 owner 或 DAG 变化超出用户确认的 affectedUnits 时停止并报告门禁。
-13. Planner、Shadow 与 Active 角色、threadId、lease 和 state epoch 由 Harness 管理。每次 Stage2 命令完成后重新查询状态。只有 Unit 证据闭合后才能报告 COMPLETE，只有全部 Unit 完成后才能报告 BASELINE_READY。
+1. 每次处理 Stage2 用户回复前重新运行 \`stage2 status . --json\` 和 \`stage2 next . --json\`。只展示当前 Active、Shadow、Work Package 看板、一个用户门禁、下一机器动作和 blocker。旧 schema 3 或 4 项目先执行 \`stage2 migrate . --dry-run\`，展示保留和失效内容，得到用户授权后执行 \`--apply\`。
+2. 当前不存在用户门禁且 next 返回机器动作时，统一运行一次 \`processor-agent stage2 advance .\`。Harness 负责同时派发可并行的 Active Implementation 与 Shadow Package Design。\`draft\`、\`design\`、\`implement\` 和 \`verify\` 只作为诊断与精确重试入口。
+3. System Design 将 Architecture Role 转换为 Design Component、Interface Skeleton 和 Work Package。parentId 只表达设计归属；Work Package 承担 Design、实现、路径权限和验证。旧 Unit 结论只作候选证据。
+4. kind=decision_request 时只展示当前一个问题、需要用户决定的原因、候选、推荐、后果和影响。用户明确选择后运行 \`stage2 decide . <decision-id> <option-id>\`；自定义结论使用 \`--text\`。推荐不构成用户批准。提交后自动运行 \`stage2 draft .\` 或 \`stage2 design . <work-package-id>\` 将结论写回 Design。
+5. kind=system_design_approval 时展示 \`design/plan.md\`、Component 层次、Interface owner、Work Package、路径 owner、依赖、验收和风险。只有用户明确批准后才运行 \`stage2 approve .\`。
+6. kind=package_design 和可机械执行的 package_design_revision 由 \`stage2 advance .\` 处理。Harness 先执行确定性 canonicalization，局部字段问题使用 hash 绑定 Patch，语义变化才完整重生成。Workspace Agent 不直接代写 Harness 管理的 Design。
+7. kind=package_design_revision 存在 full_redraft 或用户决策时展示 issues，获得明确修订要求后使用 \`stage2 design . <work-package-id> --instruction <修订要求>\`。kind=package_design_approval 时展示 Design revision、精确接口、状态生命周期、实现路径、验收命令和风险。用户明确批准后运行 \`stage2 approve . <work-package-id>\`。
+8. 每个 Package 固定运行一个独立 Static Review Worker 和一个独立 Verification Worker，不再逐 Package 询问验证模式。二者读取同一冻结版本，互不读取对方输出，均不占用 Agent A/B 持久槽位。
+9. kind=active_implementation 与 kind=verification 由 \`stage2 advance .\` 派发。用户修正已批准 Design 或实现暴露局部缺口时运行 \`stage2 reopen . <work-package-id> --reason <原因>\`。
+10. Active 完成实现和主验证后，下一 Package 与它无依赖且没有 shared interface 或全局协议变化时可以提前轮转。当前 Package 保持 VERIFYING。依赖 Package 必须等待两个独立 Worker 均通过。
+11. Research 按需触发。项目源码和 Architecture 已给出事实时直接闭合 Design；只有外部实现惯例、论文、未知 IP、工具限制或用户明确要求时启动短生命周期 Research Worker。缺少待设计 Bundle、源码和测试不能形成 Research 循环门禁。
+12. Stage2 发现已批准 Architecture 错误时，形成单一 repair target 的 Architecture Rework Proposal，得到用户明确确认后运行 \`stage2 rework-start . --proposal-json <json>\`。Stage1 重新批准后运行 \`stage2 rework-resume .\`，受影响 Package 标记 NEEDS_REALIGN。
+13. Agent A/B 的 runtimeRef、lease、workspaceRevision 和路径权限由 Harness 管理。Provider threadId 只进入 Runtime Registry。只有 Package 主验证、Static Review 和 Verification 全部通过后才能报告 COMPLETE，全部 Package 完成后才能报告 BASELINE_READY。
 
 启动前快照仅用于发现明显漂移，磁盘查询结果拥有最终解释权：Stage1=${summary.status}，revision=${summary.revision}，nextAction=${nextAction}，nextDecision=${nextDecision}，Stage2=${stage2Snapshot}。
 现在执行启动动作并继续工作流。`;
@@ -689,9 +689,9 @@ export async function auditStage1Architecture(
 
 审查标准：
 1. 每个 blocking 决策都一致反映在 Architecture Overview 和 Verification Plan 中。
-2. ISA 与系统边界、流水线与发射语义、全局 stall、flush、redirect、exception、kill、backpressure 和验证门禁已经充分闭合，可以进入 Stage2 Topology Planning。
+2. ISA 与系统边界、流水线与发射语义、全局 stall、flush、redirect、exception、kill、backpressure 和验证门禁已经充分闭合，可以进入 Stage2 System Design。
 3. 推荐方案不能写成已批准事实。
-4. Stage1 不决定 Implementation Unit、Chisel Module、源码路径、接口 owner、DAG 或实施 wave。
+4. Stage1 不决定 Design Component、Work Package、Chisel Module、源码路径、接口 owner 或 Package DAG。
 5. 影响正确性或接口的未决项属于 error。Stage2 的模块内部实现细节不属于 error。
 6. 只有 Stage2 无需自行发明全局架构规则时才能返回 pass。
 7. ARCHITECTURE_REVIEW 阶段的正式文档保持草案状态，独立审查通过并由用户批准后才晋升为已批准。草案状态本身不构成 finding。
