@@ -305,6 +305,19 @@ test("Stage2 Package Design remains unapprovable when it changes a shared interf
   ]);
 });
 
+test("Stage2 ignores descriptive no-change entries in sharedInterfaceChanges", () => {
+  const system = validateSystemDesignProposal(systemProposal(), architectureRoles());
+  const workPackage = createWorkPackageStates(system).wp_frontend!;
+  const proposal = packageDesign(workPackage, [
+    "无。完整复用已经批准的 shared interface。",
+    "不新增跨 Component 字段。",
+  ]);
+  const validated = validatePackageDesignProposal(proposal, workPackage, system);
+  workPackage.design = designRecord(validated);
+
+  assert.deepEqual(packageDesignIssues(workPackage), []);
+});
+
 test("Stage2 rotates early only to an independent approved Package and keeps runtime handles", () => {
   const independent = workspaceStage();
   prepareVerifyingActive(independent, "wp_frontend", "runtime-active");

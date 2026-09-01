@@ -38,7 +38,7 @@ export function canonicalizePackageDesignProposal(
   if (
     Array.isArray(shared)
     && shared.length > 0
-    && shared.every((item) => typeof item === "string" && isEmptyChangeMarker(item))
+    && shared.every((item) => typeof item === "string" && isEmptySharedInterfaceChange(item))
   ) {
     changes.push({
       ruleId: "canonical_empty_shared_interface_changes",
@@ -226,7 +226,7 @@ function canonicalWorkPackageIds(
   const result: string[] = [];
   for (const value of values) {
     const trimmed = value.trim();
-    if (isEmptyChangeMarker(trimmed)) {
+    if (isEmptySharedInterfaceChange(trimmed)) {
       continue;
     }
     if (known.has(trimmed)) {
@@ -244,8 +244,13 @@ function canonicalWorkPackageIds(
   return [...new Set(result)];
 }
 
-function isEmptyChangeMarker(value: string): boolean {
-  return EMPTY_CHANGE_MARKERS.has(value.trim().toLocaleLowerCase().replace(/[。.]$/u, ""));
+export function isEmptySharedInterfaceChange(value: string): boolean {
+  const normalized = value.trim().toLocaleLowerCase().replace(/[。.]$/u, "");
+  if (EMPTY_CHANGE_MARKERS.has(normalized)) {
+    return true;
+  }
+  return /^(?:无(?:[。。，,;；\s]|$)|不新增)/u.test(normalized)
+    || /^no (?:shared )?interface changes?(?:[.:,;\s]|$)/u.test(normalized);
 }
 
 function posixShellQuote(value: string): string {

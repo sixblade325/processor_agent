@@ -1419,6 +1419,9 @@ export interface Stage2SystemDesignRevisionRequest {
   requestedAt: string;
   baseDesignRevision: number;
   baseDocumentSha256: string;
+  kind?: "candidate_revision" | "approved_reopen";
+  affectedWorkPackages?: string[];
+  baseApproval?: Stage2SystemDesignApprovalV4;
   instruction: string;
   status: "pending" | "applied";
   appliedDesignRevision?: number;
@@ -1809,6 +1812,12 @@ export interface Stage2WorkspaceTaskEnvelope {
 export type Stage2WorkspaceNextAction =
   | { kind: "system_design_draft"; slot: Stage2AgentSlot }
   | { kind: "system_design_revision"; slot: Stage2AgentSlot; issues: string[] }
+  | {
+    kind: "system_design_reopen";
+    revision: number;
+    affectedWorkPackages: string[];
+    changes: string[];
+  }
   | { kind: "decision_request"; scope: "system" | "package"; workPackageId?: string; decision: Stage2DecisionRequestSpec }
   | { kind: "system_design_approval"; path: string; revision: number; documentSha256: string }
   | { kind: "package_design"; workPackageId: string; slot: Stage2AgentSlot }

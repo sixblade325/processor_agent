@@ -376,8 +376,22 @@ export function renderSystemDesignDocument(
       "",
       `状态：${revisionRequest.status === "pending" ? "待应用" : "已应用"}`,
       "",
+      `类型：${revisionRequest.kind === "approved_reopen" ? "已批准 System Design 重新打开" : "待批准草案修订"}`,
+      "",
       `基线：System Design revision ${String(revisionRequest.baseDesignRevision)}，sha256=\`${revisionRequest.baseDocumentSha256}\``,
       "",
+      ...(revisionRequest.affectedWorkPackages === undefined
+        ? []
+        : [
+          `受影响 Work Package：${revisionRequest.affectedWorkPackages.map((id) => `\`${id}\``).join("、")}`,
+          "",
+        ]),
+      ...(revisionRequest.baseApproval === undefined
+        ? []
+        : [
+          `旧审批：revision ${String(revisionRequest.baseApproval.designRevision)}，sha256=\`${revisionRequest.baseApproval.documentSha256}\``,
+          "",
+        ]),
       revisionRequest.instruction,
       "",
     );

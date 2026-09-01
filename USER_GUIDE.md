@@ -295,7 +295,17 @@ node dist\src\cli.js stage2 approve E:\107\my_core
 node dist\src\cli.js stage2 revise E:\107\my_core --revision 3 --instruction "Issue 逻辑进入 Instruction Queue，删除独立 Issue Component。"
 ```
 
-`stage2 revise` 只接受当前待批准的 System Design revision。Harness 绑定当前文档 hash、持久化 instruction、失效旧 Review，并返回 `SYSTEM_DESIGN_DRAFT`。Author 尚未启动时，重复执行相同 revision 的命令会更新 pending Revision Request。随后运行 `stage2 draft`，Agent A 自动读取该请求，Agent B 重新独立审查。PowerShell `.cmd` 对多行参数可能截断，第一版请把多项要求组织在一个单行参数中。
+`stage2 revise` 可以处理待批准草案，也可以重新打开 `PACKAGE_LOOP` 中已批准的 System Design。Harness 绑定当前文档 hash、持久化 instruction、失效旧 Review，并返回 `SYSTEM_DESIGN_DRAFT`。Author 尚未启动时，重复执行相同 revision 的命令会更新 pending Revision Request。随后运行 `stage2 draft`，Agent A 自动读取该请求，Agent B 重新独立审查。PowerShell `.cmd` 对多行参数可能截断，第一版请把多项要求组织在一个单行参数中。
+
+重新打开已批准 System Design 时，指定直接受影响的 Work Package。多个目标重复使用 `--affected`：
+
+```powershell
+node dist\src\cli.js stage2 revise E:\107\my_core --revision 10 --instruction "Control 复用现有 Cache 接口，只增加消费者连接。" --affected wp_control --affected wp_frontend
+```
+
+Harness 会合并 Package Design 已声明的 shared interface change 和 `affectedWorkPackages`，再计算传递消费者。旧 System Design approval 保存在 Revision Request 中，所有 Agent assignment 被释放。重新审查和批准后，受影响或 plan 已变化的 Package 重新对齐，未受影响且 plan 不变的 Package 保留已有状态和证据。
+
+`sharedInterfaceChanges` 只填写实际变化。没有变化时使用空数组；`无`、`不新增` 等说明会被 Harness 规范化为空，不触发 System Design 重新打开。
 
 System Design 批准后，Harness 建立 Work Package board 并把第一个 ready Package 分配给 Shadow Agent：
 
@@ -309,7 +319,7 @@ Harness 将结果写入 `design/packages/wp_regfile.md`。Package Design 可以�
 node dist\src\cli.js stage2 design E:\107\my_core wp_regfile --instruction "读端口为两个组合读口，写口在时钟上升沿提交"
 ```
 
-每个 Work Package 固定拥有自己的 Component、Design 文档、源码路径和测试路径。Harness 拒绝 path owner 重叠。Package Design 改变 shared interface 时无法批准，必须先修订 System Design。
+每个 Work Package 固定拥有自己的 Component、Design 文档、源码路径和测试路径。Harness 拒绝 path owner 重叠。Package Design 改变 shared interface 时无法批准，`stage2 next` 返回 `system_design_reopen`，用户确认后使用上述 `stage2 revise` 入口。
 
 Package Design 闭合后由用户批准：
 

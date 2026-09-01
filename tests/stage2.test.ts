@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import test from "node:test";
 import { buildWorkspaceAgentPrompt } from "../src/agent-runtime.js";
 import { sha256 } from "../src/io.js";
 import { validateArchitectureRoleMapping } from "../src/stage2/topology-model.js";
 import {
   buildStage2CodexArguments,
+  createStage2RunDirectory,
   type Stage2AgentCall,
   type Stage2AgentExecutor,
 } from "../src/stage2-runtime.js";
@@ -54,6 +55,7 @@ import {
   loadStage2Workspace,
   migrateStage2Workspace,
   requestSystemDesignRevision,
+  runSystemDesignDraft,
   runPackageDesign,
   runPackageVerification,
   summarizeStage2Workspace,
@@ -144,6 +146,265 @@ test("Stage2 can return an unapproved System Design candidate for a recorded rev
     approveSystemDesign(fixture.project),
     /not awaiting approval/u,
   );
+});
+
+test("Stage2 reopens an approved System Design for shared interface changes and realigns only affected Packages", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile", "fetch"]);
+  const initialized = await initStage2Workspace(fixture.project);
+  const stage2 = initialized.state.stage2;
+  stage2.status = "SYSTEM_DESIGN_APPROVAL";
+  stage2.systemDesign.revision = 1;
+  stage2.systemDesign.proposal = parallelWorkspaceSystemProposalFixture();
+  stage2.systemDesign.review = {
+    reviewedAt: "2026-08-31T00:00:00.000Z",
+    runtimeRef: "runtime-review",
+    runId: "run-review",
+    report: {
+      schemaVersion: 1,
+      systemDesignSha256: "pending",
+      verdict: "pass",
+      summary: "parallel fixture review passed",
+      findings: [],
+      decisionRequests: [],
+    },
+  };
+  let content = renderSystemDesignDocument(initialized.state, stage2, "待批准");
+  stage2.systemDesign.documentSha256 = sha256(content);
+  stage2.systemDesign.review.report.systemDesignSha256 = stage2.systemDesign.documentSha256;
+  await writeFile(join(fixture.project, "design", "plan.md"), content, "utf8");
+  await saveProjectState(initialized.root, initialized.state);
+  let loaded = await approveSystemDesign(fixture.project);
+  const oldApproval = structuredClone(loaded.state.stage2.systemDesign.approval!);
+  loaded.state.stage2.workPackages.wp_fetch!.status = "COMPLETE";
+  loaded.state.stage2.workPackages.wp_fetch!.reopened.push({
+    at: "2026-08-31T00:01:00.000Z",
+    reason: "unaffected-state-sentinel",
+  });
+  loaded.state.stage2.runtimeRegistry.runtime_stale = {
+    runtimeRef: "runtime_stale",
+    provider: "codex",
+    phase: "package",
+    status: "active",
+    latestRunId: "run_stale_queued",
+    runCount: 1,
+    cumulativePromptBytes: 0,
+    createdAt: "2026-08-30T00:00:00.000Z",
+    updatedAt: "2026-08-30T00:00:00.000Z",
+  };
+  loaded.state.stage2.runtimeRuns.run_stale_queued = {
+    runId: "run_stale_queued",
+    runtimeRef: "runtime_stale",
+    task: "package_design",
+    slot: "A",
+    workPackageId: "wp_fetch",
+    status: "queued",
+    promptDigest: "stale",
+    inputArtifactHashes: {},
+    outputArtifactHashes: {},
+    toolPolicy: "read-only",
+    runtimePath: join(fixture.project, ".missing-runtime", "run_stale_queued"),
+    startedAt: "2026-08-30T00:00:00.000Z",
+    lastEventAt: "2026-08-30T00:00:00.000Z",
+    eventCount: 0,
+  };
+  await saveProjectState(loaded.root, loaded.state);
+
+  await runPackageDesign(fixture.project, "wp_regfile", undefined, {
+    executor: async () => {
+      const proposal = parallelPackageDesign("wp_regfile");
+      proposal.sharedInterfaceChanges = ["RegFile response adds Backend as a consumer"];
+      return {
+        output: proposal,
+        events: "",
+        threadId: "thread-shared-interface-design",
+      };
+    },
+  });
+  loaded = await loadStage2Workspace(fixture.project);
+  const beforeReopen = await summarizeStage2Workspace(loaded);
+  assert.equal(beforeReopen.readyActions[0]?.kind, "system_design_reopen");
+  assert.deepEqual(
+    beforeReopen.readyActions[0]?.kind === "system_design_reopen"
+      ? beforeReopen.readyActions[0].affectedWorkPackages
+      : [],
+    ["wp_regfile"],
+  );
+
+  const staleRuntimePath = await createStage2RunDirectory(
+    fixture.project,
+    "wp_regfile",
+    "package_design",
+  );
+  const staleRunId = basename(staleRuntimePath);
+  loaded.state.stage2.runtimeRegistry.runtime_stale_model_completed = {
+    runtimeRef: "runtime_stale_model_completed",
+    provider: "codex-cli",
+    phase: "package",
+    status: "idle",
+    latestRunId: staleRunId,
+    runCount: 1,
+    cumulativePromptBytes: 0,
+    createdAt: "2026-08-31T00:00:00.000Z",
+    updatedAt: "2026-08-31T00:01:00.000Z",
+  };
+  loaded.state.stage2.runtimeRuns[staleRunId] = {
+    runId: staleRunId,
+    runtimeRef: "runtime_stale_model_completed",
+    task: "package_design",
+    slot: "B",
+    workPackageId: "wp_regfile",
+    status: "queued",
+    promptDigest: "stale-model-completed",
+    inputArtifactHashes: {},
+    outputArtifactHashes: {},
+    toolPolicy: "read-only",
+    runtimePath: staleRuntimePath,
+    startedAt: "2026-08-31T00:00:00.000Z",
+    lastEventAt: "2026-08-31T00:01:00.000Z",
+    completedAt: "2026-08-31T00:01:00.000Z",
+    eventCount: 1,
+  };
+  await writeFile(join(staleRuntimePath, "run-status.json"), `${JSON.stringify({
+    runId: staleRunId,
+    runtimeRef: "runtime_stale_model_completed",
+    task: "package_design",
+    slot: "B",
+    workPackageId: "wp_regfile",
+    status: "model_completed",
+    startedAt: "2026-08-31T00:00:00.000Z",
+    lastEventAt: "2026-08-31T00:01:00.000Z",
+    completedAt: "2026-08-31T00:01:00.000Z",
+    eventCount: 1,
+  }, null, 2)}\n`, "utf8");
+  await saveProjectState(loaded.root, loaded.state);
+
+  loaded = await requestSystemDesignRevision(
+    fixture.project,
+    1,
+    "把 RegFile response 的 Backend consumer 写入 System Design，不改变 Architecture。",
+  );
+  assert.equal(loaded.state.stage2.status, "SYSTEM_DESIGN_DRAFT");
+  assert.equal(loaded.state.stage2.systemDesign.approval, undefined);
+  assert.ok(Object.values(loaded.state.stage2.agents).every((assignment) => assignment.role === "idle"));
+  const request = loaded.state.stage2.systemDesign.revisionRequests?.at(-1);
+  assert.equal(request?.kind, "approved_reopen");
+  assert.deepEqual(request?.affectedWorkPackages, ["wp_regfile"]);
+  assert.deepEqual(request?.baseApproval, oldApproval);
+
+  const revisedStage2 = loaded.state.stage2;
+  revisedStage2.systemDesign.revision = 2;
+  revisedStage2.systemDesign.proposal = structuredClone(parallelWorkspaceSystemProposalFixture());
+  revisedStage2.systemDesign.proposal.summary = "revised parallel fixture System Design";
+  request!.status = "applied";
+  request!.appliedDesignRevision = 2;
+  revisedStage2.status = "SYSTEM_DESIGN_APPROVAL";
+  revisedStage2.systemDesign.review = {
+    reviewedAt: "2026-08-31T00:02:00.000Z",
+    runtimeRef: "runtime-review-revised",
+    runId: "run-review-revised",
+    report: {
+      schemaVersion: 1,
+      systemDesignSha256: "pending",
+      verdict: "pass",
+      summary: "revised fixture review passed",
+      findings: [],
+      decisionRequests: [],
+    },
+  };
+  content = renderSystemDesignDocument(loaded.state, revisedStage2, "待批准");
+  revisedStage2.systemDesign.documentSha256 = sha256(content);
+  revisedStage2.systemDesign.review.report.systemDesignSha256 =
+    revisedStage2.systemDesign.documentSha256;
+  await writeFile(join(fixture.project, "design", "plan.md"), content, "utf8");
+  await saveProjectState(loaded.root, loaded.state);
+
+  loaded = await approveSystemDesign(fixture.project);
+  assert.equal(loaded.state.stage2.status, "PACKAGE_LOOP");
+  assert.equal(loaded.state.stage2.workPackages.wp_regfile?.status, "DESIGNING");
+  assert.equal(
+    loaded.state.stage2.workPackages.wp_regfile?.reopened.at(-1)?.reason,
+    "System Design SDR_001 requires Package realignment",
+  );
+  assert.equal(loaded.state.stage2.workPackages.wp_regfile?.design?.approval, undefined);
+  assert.equal(loaded.state.stage2.workPackages.wp_fetch?.status, "COMPLETE");
+  assert.equal(
+    loaded.state.stage2.workPackages.wp_fetch?.reopened.at(-1)?.reason,
+    "unaffected-state-sentinel",
+  );
+  assert.notEqual(
+    loaded.state.stage2.systemDesign.approval?.documentSha256,
+    oldApproval.documentSha256,
+  );
+});
+
+test("Stage2 approved reopen preserves Work Package plans outside the affected set", async () => {
+  const fixture = await createCompletedStage1Fixture(["regfile", "fetch"]);
+  const initialized = await initStage2Workspace(fixture.project);
+  const stage2 = initialized.state.stage2;
+  stage2.status = "SYSTEM_DESIGN_APPROVAL";
+  stage2.systemDesign.revision = 1;
+  stage2.systemDesign.proposal = parallelWorkspaceSystemProposalFixture();
+  stage2.systemDesign.review = {
+    reviewedAt: "2026-08-31T00:00:00.000Z",
+    runtimeRef: "runtime-review",
+    runId: "run-review",
+    report: {
+      schemaVersion: 1,
+      systemDesignSha256: "pending",
+      verdict: "pass",
+      summary: "parallel fixture review passed",
+      findings: [],
+      decisionRequests: [],
+    },
+  };
+  const content = renderSystemDesignDocument(initialized.state, stage2, "待批准");
+  stage2.systemDesign.documentSha256 = sha256(content);
+  stage2.systemDesign.review.report.systemDesignSha256 = stage2.systemDesign.documentSha256;
+  await writeFile(join(fixture.project, "design", "plan.md"), content, "utf8");
+  await saveProjectState(initialized.root, initialized.state);
+  let loaded = await approveSystemDesign(fixture.project);
+  const originalFetchPlan = structuredClone(loaded.state.stage2.workPackages.wp_fetch!.plan);
+  await requestSystemDesignRevision(
+    fixture.project,
+    1,
+    "Only revise the RegFile consumer relation.",
+    { affectedWorkPackages: ["wp_regfile"] },
+  );
+
+  await runSystemDesignDraft(fixture.project, undefined, {
+    executor: async (call) => {
+      if (call.task === "system_design_draft") {
+        const proposal = parallelWorkspaceSystemProposalFixture();
+        proposal.workPackages.find((item) => item.id === "wp_fetch")!.acceptance.push(
+          "incidental rewrite outside the approved reopen scope",
+        );
+        return { output: proposal, events: "", threadId: "thread-scoped-draft" };
+      }
+      if (call.task === "system_design_review") {
+        const designSha256 = call.prompt.match(/哈希为 ([0-9a-f]{64})/u)?.[1];
+        assert.ok(designSha256);
+        return {
+          output: {
+            schemaVersion: 1,
+            systemDesignSha256: designSha256,
+            verdict: "pass",
+            summary: "scoped revision passed",
+            findings: [],
+            decisionRequests: [],
+          },
+          events: "",
+          threadId: "thread-scoped-review",
+        };
+      }
+      throw new Error(`Unexpected task ${call.task}`);
+    },
+  });
+
+  loaded = await loadStage2Workspace(fixture.project);
+  const revisedFetchPlan = loaded.state.stage2.systemDesign.proposal!.workPackages.find((item) =>
+    item.id === "wp_fetch"
+  );
+  assert.deepEqual(revisedFetchPlan, originalFetchPlan);
 });
 
 test("Stage2 approval records its authority before assigning the first Shadow", async () => {
@@ -252,6 +513,9 @@ test("Stage2 advance overlaps Active Implementation and Shadow Package Design", 
       };
     }
     if (call.task === "package_implementation") {
+      assert.ok(call.readManifest);
+      assert.ok(call.readManifest.allowedRoots.includes("src/main/scala/demo"));
+      assert.ok(call.readManifest.allowedRoots.includes("src/test/scala/demo"));
       return {
         output: {
           schemaVersion: 1,

@@ -97,7 +97,7 @@ Stage2 不再维护固定的 `S2_TOP_*` 决策序列。Author 或 Reviewer 仅�
 5. `design/plan.md` 内容哈希、Architecture approval 哈希、Component topology 哈希、Interface 哈希和 Work Package plan 哈希一致。
 6. 用户明确执行 System Design approval。
 
-### 3.4 待批准草案退回修订
+### 3.4 System Design 修订与重新打开
 
 用户审阅完整候选草案后可以拒绝批准，并通过 Harness 登记 System Design Revision Request：
 
@@ -111,7 +111,23 @@ SYSTEM_DESIGN_APPROVAL
 
 Revision Request 绑定当前 Design revision 和 document hash，持久化用户原始 instruction，失效当前 Review，并保留旧 Proposal 作为修订基线。Author 启动前可以用同一命令更新 pending Request。Author 自动读取已登记 instruction，Reviewer 必须检查新 Proposal 是否落实该要求。新 Review 通过后才能再次进入 `SYSTEM_DESIGN_APPROVAL`。
 
-该入口只处理尚未批准的 System Design。进入 `PACKAGE_LOOP` 后的全局设计修改继续使用 Design reopen 或 Architecture Rework，不复用该状态转换。
+进入 `PACKAGE_LOOP` 后，Package Design 若声明 shared interface change，`stage2 next` 必须返回 `system_design_reopen` 用户门禁，禁止继续派发同一 Package 的无效重写。用户确认后执行：
+
+```text
+PACKAGE_LOOP
+-> stage2 revise --revision <n> --instruction <text> --affected <work-package-id>
+-> SYSTEM_DESIGN_DRAFT
+-> Agent A 修订
+-> Agent B 重新独立审查
+-> 用户重新批准
+-> PACKAGE_LOOP
+```
+
+`--affected` 可以重复。Harness 同时合并发起该缺口的 Package 及其 `affectedWorkPackages`，再沿 Design、Implementation 和 Integration 依赖计算传递消费者。重新打开时必须满足没有 working Agent 和活动 run，随后释放所有 Agent assignment、失效当前 System Design Review 与 approval，并把旧 approval 完整保存在 Revision Request 中。
+
+`sharedInterfaceChanges` 只记录实际变化。`无`、`不新增` 等无变化说明由 Harness 规范化为空，不得触发重新打开或扩大受影响范围。
+
+新 System Design 重新批准时，受影响 Package、传递消费者以及 Work Package plan 实际发生变化的 Package 进入重新对齐。其 Package Design approval、Implementation 和 Verification 失效。未受影响且 plan 不变的 Package 保留状态和证据。Architecture 行为发生变化时继续使用 Architecture Rework，不得用 System Design reopen 绕过 Stage1。
 
 ## 4. Work Package 流程
 
@@ -286,7 +302,7 @@ processor-agent stage2 cancel <path> <run-id-or-runtime-ref>
 processor-agent stage2 migrate <path> --dry-run|--apply
 processor-agent stage2 start <path>
 processor-agent stage2 draft <path>
-processor-agent stage2 revise <path> --revision <n> --instruction <text>
+processor-agent stage2 revise <path> --revision <n> --instruction <text> [--affected <work-package-id> ...]
 processor-agent stage2 decide <path> <decision-id> <option-id>
 processor-agent stage2 decide <path> <decision-id> --text <conclusion>
 processor-agent stage2 approve <path>

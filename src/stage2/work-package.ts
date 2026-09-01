@@ -10,6 +10,7 @@ import type {
   Stage2WorkspaceStage,
 } from "../types.js";
 import { validateDecisionRequestSpecs } from "./design-package.js";
+import { isEmptySharedInterfaceChange } from "./design-revision.js";
 import { objectValue, requireStringArray, requireText } from "./proposal-validation.js";
 
 export function validatePackageDesignProposal(
@@ -209,7 +210,7 @@ export function packageDesignIssues(workPackage: Stage2WorkPackageStateV4): stri
   if (proposal.openQuestions.length > 0) {
     issues.push(...proposal.openQuestions.map((question) => `未闭合问题：${question}`));
   }
-  if (proposal.sharedInterfaceChanges.length > 0) {
+  if (proposal.sharedInterfaceChanges.some((change) => !isEmptySharedInterfaceChange(change))) {
     issues.push("Package Design 改变了已批准 shared interface，需要先修订 System Design");
   }
   for (const id of workPackage.decisionOrder) {

@@ -5,6 +5,7 @@ import type {
   Stage2WorkspaceAgentAssignment,
   Stage2WorkspaceStage,
 } from "../types.js";
+import { isEmptySharedInterfaceChange } from "./design-revision.js";
 import { areImplementationDependenciesComplete, isPackageDesignable } from "./work-package.js";
 
 export function idleWorkspaceAssignment(slot: Stage2AgentSlot): Stage2WorkspaceAgentAssignment {
@@ -141,7 +142,11 @@ export function promoteReadyShadow(stage2: Stage2WorkspaceStage): boolean {
     if (dependsTransitively(stage2, shadowPackage.id, activePackage.id)) {
       return false;
     }
-    if ((activePackage.design?.proposal.sharedInterfaceChanges.length ?? 0) > 0) {
+    if (
+      activePackage.design?.proposal.sharedInterfaceChanges.some((change) =>
+        !isEmptySharedInterfaceChange(change)
+      ) === true
+    ) {
       return false;
     }
     const otherDependenciesComplete = shadowPackage.plan.implementationDependsOn.every((id) =>

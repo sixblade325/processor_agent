@@ -330,11 +330,16 @@ async function commandStage2(command: string, args: ParsedArguments): Promise<vo
       break;
     }
     case "revise": {
-      assertOnlyOptions(args, ["revision", "instruction"]);
+      assertOnlyOptions(args, ["revision", "instruction", "affected"]);
       const loaded = await requestSystemDesignRevision(
         requirePositional(args, 0, "project path"),
         requireNonNegativeIntegerOption(args, "revision"),
         requireOption(args, "instruction"),
+        {
+          affectedWorkPackages: options(args, "affected")
+            .map((item) => item.trim())
+            .filter((item) => item !== "" && item !== "true"),
+        },
       );
       printStage2WorkspaceSummary(await summarizeStage2Workspace(loaded));
       break;
@@ -1245,7 +1250,7 @@ processor-agent stage2 commands:
   cancel <path> <run-id-or-runtime-ref> [--json]
   start <path> [--instruction text]
   draft <path> [--instruction text]
-  revise <path> --revision number --instruction text
+  revise <path> --revision number --instruction text [--affected work-package-id ...]
   decide <path> <decision-id> [option-id] [--text conclusion] [--note text]
   approve <path> [work-package-id]
   design <path> [work-package-id] [--instruction text]

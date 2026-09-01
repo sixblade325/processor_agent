@@ -123,6 +123,7 @@ import {
 import {
   applyDesignPatch,
   canonicalizePackageDesignProposal,
+  isEmptySharedInterfaceChange,
   packageDesignRevisionIssues,
   proposalHash,
   validateDesignPatch,
@@ -478,6 +479,22 @@ export async function runSystemDesignDraft(
   await writeAgentRun(draftRuntimeRoot, draftRun);
   const architectureRoles = loaded.state.stage1.projectSpec?.architecture.roles ?? [];
   const proposal = validateSystemDesignProposal(draftRun.output, architectureRoles);
+  if (recordedRevision?.kind === "approved_reopen") {
+    const previousIds = loaded.state.stage2.workPackageOrder;
+    const proposedById = new Map(proposal.workPackages.map((plan) => [plan.id, plan]));
+    if (
+      proposedById.size !== previousIds.length
+      || previousIds.some((id) => !proposedById.has(id))
+    ) {
+      throw new Error("Approved System Design reopen cannot add or remove Work Packages");
+    }
+    const affected = new Set(recordedRevision.affectedWorkPackages ?? []);
+    proposal.workPackages = previousIds.map((id) =>
+      affected.has(id)
+        ? structuredClone(proposedById.get(id)!)
+        : structuredClone(requireWorkPackage(loaded.state.stage2, id).plan)
+    );
+  }
   setRunStatus(working.runtimeRuns[draftRun.runId]!, "applied", now(options));
   await assertProjectReferencesExist(loaded.root, proposal.architectureReferences);
 
@@ -719,18 +736,69 @@ export async function answerStage2DecisionRequest(
   return loaded;
 }
 
+function systemDesignReopenSources(stage2: Stage2WorkspaceStage): Stage2WorkPackageStateV4[] {
+  return stage2.workPackageOrder
+    .map((id) => requireWorkPackage(stage2, id))
+    .filter((workPackage) => {
+      const design = workPackage.design;
+      return workPackage.status === "AWAITING_APPROVAL"
+        && design !== undefined
+        && design.approval === undefined
+        && design.proposal.sharedInterfaceChanges.some((change) =>
+          !isEmptySharedInterfaceChange(change)
+        );
+    });
+}
+
+function systemDesignReopenChanges(stage2: Stage2WorkspaceStage): string[] {
+  return systemDesignReopenSources(stage2).flatMap((workPackage) =>
+    workPackage.design!.proposal.sharedInterfaceChanges
+      .filter((change) => !isEmptySharedInterfaceChange(change))
+      .map((change) => `${workPackage.id}: ${change}`)
+  );
+}
+
+function systemDesignReopenAffectedPackages(
+  stage2: Stage2WorkspaceStage,
+  explicit: string[] = [],
+): string[] {
+  const roots = new Set<string>();
+  for (const id of explicit) {
+    if (stage2.workPackages[id] === undefined) {
+      throw new Error(`System Design revision affects unknown Work Package ${id}`);
+    }
+    roots.add(id);
+  }
+  for (const workPackage of systemDesignReopenSources(stage2)) {
+    roots.add(workPackage.id);
+    for (const id of workPackage.design!.proposal.affectedWorkPackages) {
+      roots.add(id);
+    }
+  }
+  if (roots.size === 0) {
+    return [];
+  }
+  const affected = transitivePackageConsumers(stage2, roots);
+  return stage2.workPackageOrder.filter((id) => affected.has(id));
+}
+
 export async function requestSystemDesignRevision(
   projectPath: string,
   expectedDesignRevision: number,
   instruction: string,
-  options: Stage2WorkspaceExecutionOptions = {},
+  options: Stage2WorkspaceExecutionOptions & { affectedWorkPackages?: string[] } = {},
 ): Promise<LoadedStage2Workspace> {
   const loaded = await loadStage2Workspace(projectPath);
   const stage2 = loaded.state.stage2;
   const pendingRequest = latestSystemDesignRevisionRequest(stage2);
   const updatesPendingRequest = stage2.status === "SYSTEM_DESIGN_DRAFT"
     && pendingRequest?.status === "pending";
-  if (stage2.status !== "SYSTEM_DESIGN_APPROVAL" && !updatesPendingRequest) {
+  const reopensApprovedDesign = stage2.status === "PACKAGE_LOOP";
+  if (
+    stage2.status !== "SYSTEM_DESIGN_APPROVAL"
+    && !reopensApprovedDesign
+    && !updatesPendingRequest
+  ) {
     throw new Error(`System Design revision cannot be requested from ${stage2.status}`);
   }
   const currentDesignRevision = updatesPendingRequest
@@ -751,6 +819,15 @@ export async function requestSystemDesignRevision(
   }
   if (Object.values(stage2.agents).some((assignment) => assignment.status === "working")) {
     throw new Error("System Design revision cannot be requested while a Stage2 Agent is working");
+  }
+  const discoveredRuns = new Map(
+    (await discoverStage2RunStatuses(loaded.root)).map((run) => [run.runId, run]),
+  );
+  if (Object.values(stage2.runtimeRuns).some((run) => {
+    const status = discoveredRuns.get(run.runId)?.status;
+    return status === "queued" || status === "running";
+  })) {
+    throw new Error("System Design revision cannot be requested while a Stage2 run is active");
   }
   await assertApprovalCurrent(loaded.root, loaded.state);
   const currentContent = await readText(resolveWithin(loaded.root, stage2.systemDesign.path));
@@ -776,15 +853,37 @@ export async function requestSystemDesignRevision(
   }
 
   const requests = stage2.systemDesign.revisionRequests ?? [];
+  const affectedWorkPackages = reopensApprovedDesign
+    ? systemDesignReopenAffectedPackages(stage2, options.affectedWorkPackages)
+    : [];
+  if (reopensApprovedDesign && affectedWorkPackages.length === 0) {
+    throw new Error(
+      "Reopening an approved System Design requires --affected or a Package Design with shared interface changes",
+    );
+  }
+  const baseApproval = reopensApprovedDesign
+    ? structuredClone(stage2.systemDesign.approval)
+    : undefined;
+  if (reopensApprovedDesign && baseApproval === undefined) {
+    throw new Error("Approved System Design reopen requires a current approval record");
+  }
   const request: Stage2SystemDesignRevisionRequest = {
     id: nextSystemDesignRevisionRequestId(requests),
     requestedAt: now(options).toISOString(),
     baseDesignRevision: stage2.systemDesign.revision,
     baseDocumentSha256: stage2.systemDesign.documentSha256,
+    kind: reopensApprovedDesign ? "approved_reopen" : "candidate_revision",
+    ...(affectedWorkPackages.length === 0 ? {} : { affectedWorkPackages }),
+    ...(baseApproval === undefined ? {} : { baseApproval }),
     instruction: normalizedInstruction,
     status: "pending",
   };
   stage2.systemDesign.revisionRequests = [...requests, request];
+  if (reopensApprovedDesign) {
+    for (const assignment of Object.values(stage2.agents)) {
+      releaseWorkspaceAssignment(assignment);
+    }
+  }
   delete stage2.systemDesign.review;
   delete stage2.systemDesign.approval;
   stage2.status = "SYSTEM_DESIGN_DRAFT";
@@ -793,7 +892,7 @@ export async function requestSystemDesignRevision(
     stage2,
     "SYSTEM_DESIGN_REVISION_REQUESTED",
     undefined,
-    `${request.id}; baseDesignRevision=${String(request.baseDesignRevision)}; baseDocumentSha256=${request.baseDocumentSha256}`,
+    `${request.id}; kind=${request.kind}; baseDesignRevision=${String(request.baseDesignRevision)}; baseDocumentSha256=${request.baseDocumentSha256}; affected=${affectedWorkPackages.join(",")}`,
     options,
   );
   const content = renderSystemDesignDocument(loaded.state, stage2, "需修订");
@@ -832,15 +931,38 @@ export async function approveSystemDesign(
   const nextPackages = createWorkPackageStates(proposal);
   const rework = stage2.architectureRework;
   const affectedByRework = new Set(rework?.affectedWorkPackages ?? []);
+  const revisionRequest = latestSystemDesignRevisionRequest(stage2);
+  const affectedByRevision = new Set(
+    revisionRequest?.kind === "approved_reopen"
+      && revisionRequest.appliedDesignRevision === stage2.systemDesign.revision
+      ? revisionRequest.affectedWorkPackages ?? []
+      : [],
+  );
+  const realignedAt = now(options).toISOString();
   for (const [id, nextPackage] of Object.entries(nextPackages)) {
     const previous = previousPackages[id];
+    const planChanged = previous !== undefined
+      && valueHash(previous.plan) !== valueHash(nextPackage.plan);
+    const revisionAffected = affectedByRevision.has(id);
     if (
       previous === undefined
-      || valueHash(previous.plan) !== valueHash(nextPackage.plan)
+      || planChanged
+      || revisionAffected
       || affectedByRework.has(id)
     ) {
       if (previous !== undefined) {
         nextPackage.reopened = [...previous.reopened];
+        if (revisionAffected || planChanged) {
+          nextPackage.reopened.push({
+            at: realignedAt,
+            reason: revisionAffected
+              ? `System Design ${revisionRequest!.id} requires Package realignment`
+              : `System Design revision ${String(stage2.systemDesign.revision)} changed the Work Package plan`,
+            ...(previous.design === undefined
+              ? {}
+              : { previousDesignSha256: previous.design.documentSha256 }),
+          });
+        }
         if (previous.design !== undefined) {
           nextPackage.design = structuredClone(previous.design);
           delete nextPackage.design.approval;
@@ -1105,6 +1227,15 @@ export function getReadyWorkspaceActions(stage2: Stage2WorkspaceStage): Stage2Wo
         decision: workPackage.decisions[decisionId]!.spec,
       }];
     }
+  }
+  const reopenChanges = systemDesignReopenChanges(stage2);
+  if (reopenChanges.length > 0) {
+    return [{
+      kind: "system_design_reopen",
+      revision: stage2.systemDesign.revision,
+      affectedWorkPackages: systemDesignReopenAffectedPackages(stage2),
+      changes: reopenChanges,
+    }];
   }
   const actions: Stage2WorkspaceNextAction[] = [];
   const shadow = Object.values(stage2.agents).find((assignment) => assignment.role === "shadow");
@@ -2824,6 +2955,32 @@ function validateWorkspaceStage(stage2: Stage2WorkspaceStage): void {
     if (request.instruction.trim() === "") {
       throw new Error(`Stage2 System Design revision request ${request.id} has an empty instruction`);
     }
+    if (
+      request.kind !== undefined
+      && request.kind !== "candidate_revision"
+      && request.kind !== "approved_reopen"
+    ) {
+      throw new Error(`Stage2 System Design revision request ${request.id} has an invalid kind`);
+    }
+    const affected = request.affectedWorkPackages ?? [];
+    if (new Set(affected).size !== affected.length) {
+      throw new Error(`Stage2 System Design revision request ${request.id} repeats affected Work Packages`);
+    }
+    for (const id of affected) {
+      if (request.status === "pending" && stage2.workPackages[id] === undefined) {
+        throw new Error(
+          `Stage2 System Design revision request ${request.id} affects unknown Work Package ${id}`,
+        );
+      }
+    }
+    if (
+      request.kind === "approved_reopen"
+      && (affected.length === 0 || request.baseApproval === undefined)
+    ) {
+      throw new Error(
+        `Stage2 approved System Design reopen ${request.id} lacks affected Work Packages or base approval`,
+      );
+    }
   }
   for (const id of stage2.workPackageOrder) {
     const workPackage = stage2.workPackages[id];
@@ -3351,6 +3508,7 @@ function isUserGateAction(action: Stage2WorkspaceNextAction): boolean {
   return new Set([
     "decision_request",
     "system_design_approval",
+    "system_design_reopen",
     "package_design_approval",
     "package_design_revision",
     "waiting_for_rotation",
@@ -3389,6 +3547,8 @@ function describeUserGate(action: Stage2WorkspaceNextAction): string {
       return `${action.decision.id}: ${action.decision.question}`;
     case "system_design_approval":
       return `确认 ${action.path} revision ${String(action.revision)}`;
+    case "system_design_reopen":
+      return `System Design revision ${String(action.revision)} 需要重新打开，影响 ${action.affectedWorkPackages.join(", ")}`;
     case "package_design_approval":
       return `确认 ${action.workPackageId} Package Design`;
     case "package_design_revision":

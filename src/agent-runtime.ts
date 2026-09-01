@@ -278,13 +278,14 @@ Stage2 交互协议：
 4. kind=decision_request 时只展示当前一个问题、需要用户决定的原因、候选、推荐、后果和影响。用户明确选择后运行 \`stage2 decide . <decision-id> <option-id>\`；自定义结论使用 \`--text\`。推荐不构成用户批准。提交后自动运行 \`stage2 draft .\` 或 \`stage2 design . <work-package-id>\` 将结论写回 Design。
 5. kind=system_design_approval 时展示 \`design/plan.md\`、Component 层次、Interface owner、Work Package、路径 owner、依赖、验收和风险。只有用户明确批准后才运行 \`stage2 approve .\`。
 6. kind=package_design 和可机械执行的 package_design_revision 由 \`stage2 advance .\` 处理。Harness 先执行确定性 canonicalization，局部字段问题使用 hash 绑定 Patch，语义变化才完整重生成。Workspace Agent 不直接代写 Harness 管理的 Design。
-7. kind=package_design_revision 存在 full_redraft 或用户决策时展示 issues，获得明确修订要求后使用 \`stage2 design . <work-package-id> --instruction <修订要求>\`。kind=package_design_approval 时展示 Design revision、精确接口、状态生命周期、实现路径、验收命令和风险。用户明确批准后运行 \`stage2 approve . <work-package-id>\`。
-8. 每个 Package 固定运行一个独立 Static Review Worker 和一个独立 Verification Worker，不再逐 Package 询问验证模式。二者读取同一冻结版本，互不读取对方输出，均不占用 Agent A/B 持久槽位。
-9. kind=active_implementation 与 kind=verification 由 \`stage2 advance .\` 派发。用户修正已批准 Design 或实现暴露局部缺口时运行 \`stage2 reopen . <work-package-id> --reason <原因>\`。
-10. Active 完成实现和主验证后，下一 Package 与它无依赖且没有 shared interface 或全局协议变化时可以提前轮转。当前 Package 保持 VERIFYING。依赖 Package 必须等待两个独立 Worker 均通过。
-11. Research 按需触发。项目源码和 Architecture 已给出事实时直接闭合 Design；只有外部实现惯例、论文、未知 IP、工具限制或用户明确要求时启动短生命周期 Research Worker。缺少待设计 Bundle、源码和测试不能形成 Research 循环门禁。
-12. Stage2 发现已批准 Architecture 错误时，形成单一 repair target 的 Architecture Rework Proposal，得到用户明确确认后运行 \`stage2 rework-start . --proposal-json <json>\`。Stage1 重新批准后运行 \`stage2 rework-resume .\`，受影响 Package 标记 NEEDS_REALIGN。
-13. Agent A/B 的 runtimeRef、lease、workspaceRevision 和路径权限由 Harness 管理。Provider threadId 只进入 Runtime Registry。只有 Package 主验证、Static Review 和 Verification 全部通过后才能报告 COMPLETE，全部 Package 完成后才能报告 BASELINE_READY。
+7. kind=system_design_reopen 时展示 shared interface 变化、受影响 Work Package 和修订边界。只有用户明确批准重新打开后才运行 \`stage2 revise . --revision <n> --instruction <修订要求> --affected <work-package-id>\`。\`--affected\` 可重复，Architecture 行为变化必须改走 Architecture Rework。
+8. kind=package_design_revision 存在 full_redraft 或用户决策时展示 issues，获得明确修订要求后使用 \`stage2 design . <work-package-id> --instruction <修订要求>\`。kind=package_design_approval 时展示 Design revision、精确接口、状态生命周期、实现路径、验收命令和风险。用户明确批准后运行 \`stage2 approve . <work-package-id>\`。
+9. 每个 Package 固定运行一个独立 Static Review Worker 和一个独立 Verification Worker，不再逐 Package 询问验证模式。二者读取同一冻结版本，互不读取对方输出，均不占用 Agent A/B 持久槽位。
+10. kind=active_implementation 与 kind=verification 由 \`stage2 advance .\` 派发。用户修正已批准 Design 或实现暴露局部缺口时运行 \`stage2 reopen . <work-package-id> --reason <原因>\`。
+11. Active 完成实现和主验证后，下一 Package 与它无依赖且没有 shared interface 或全局协议变化时可以提前轮转。当前 Package 保持 VERIFYING。依赖 Package 必须等待两个独立 Worker 均通过。
+12. Research 按需触发。项目源码和 Architecture 已给出事实时直接闭合 Design；只有外部实现惯例、论文、未知 IP、工具限制或用户明确要求时启动短生命周期 Research Worker。缺少待设计 Bundle、源码和测试不能形成 Research 循环门禁。
+13. Stage2 发现已批准 Architecture 错误时，形成单一 repair target 的 Architecture Rework Proposal，得到用户明确确认后运行 \`stage2 rework-start . --proposal-json <json>\`。Stage1 重新批准后运行 \`stage2 rework-resume .\`，受影响 Package 标记 NEEDS_REALIGN。
+14. Agent A/B 的 runtimeRef、lease、workspaceRevision 和路径权限由 Harness 管理。Provider threadId 只进入 Runtime Registry。只有 Package 主验证、Static Review 和 Verification 全部通过后才能报告 COMPLETE，全部 Package 完成后才能报告 BASELINE_READY。
 
 启动前快照仅用于发现明显漂移，磁盘查询结果拥有最终解释权：Stage1=${summary.status}，revision=${summary.revision}，nextAction=${nextAction}，nextDecision=${nextDecision}，Stage2=${stage2Snapshot}。
 现在执行启动动作并继续工作流。`;

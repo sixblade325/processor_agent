@@ -629,6 +629,7 @@ System Design 必须完成以下内容：
 5. decisionRequests 只允许用于改变 Architecture Role、流水寄存边界、全局跨周期状态、identity/replay、stall/flush/kill/serialization 范围、跨 Package Interface、重大工程取舍或 Stage1 Rework 的问题。命名、helper、普通 Bundle 组织和局部代码布局不得打断用户。
 6. 旧 S2_TOP 结论和旧 Unit 只作为候选证据。重新划分 Component 与 Work Package，不能继承旧批准。
 7. 缺少待设计的 Bundle、源码或测试不构成 Research blocker。基于 Architecture 先闭合可实现设计。
+8. Task Envelope 的 revisionRequest.kind 为 approved_reopen 时，affectedWorkPackages 是本轮唯一允许重新对齐的 Package 集合。集合外的 Work Package plan 必须逐字段保持当前批准值和原顺序，不得改写 acceptance、依赖、路径、Component 归属或 designPath。只读消费者关系修订不得扩大 Bundle ABI、生产者或外部行为。
 
 顶层 Component 的 parentId 使用 null，子 Component 使用父 Component id。architectureReferences 只能填写实际存在的项目相对文件路径，不附加注释、哈希或描述。所有 id 使用 lower_snake_case。自然语言使用简体中文。最终只输出符合 Schema 的 JSON。
 
@@ -655,7 +656,7 @@ export function buildSystemDesignReviewPrompt(
 
 ${PROJECT_READER_INSTRUCTION}
 
-审查对象是磁盘中当前未批准的 design/plan.md，哈希为 ${designSha256}。Task Envelope 中的 proposal 与该文件是同一冻结草案。error finding 必须给出具体缺口、涉及产物和恢复动作。legacyEvidence 只提供历史候选和问题索引，不具有当前 approval 权威，不能仅因新草案偏离旧 S2_TOP、旧 Unit 或旧 Plan 而报告 error。草案必须在每个开放 DecisionRequest 的 recommendation 下内部一致；备选项可能改变 Component、Interface 或 Work Package，由用户回答后触发新草案。不得仅因存在这种备选项报告 error。新增 decisionRequests 只允许覆盖高风险用户决策类别。可由 Agent 在 Package Design 中闭合的问题写 finding，不生成用户 DecisionRequest。最终只输出符合 Schema 的 JSON。
+审查对象是磁盘中当前未批准的 design/plan.md，哈希为 ${designSha256}。Task Envelope 中的 proposal 与该文件是同一冻结草案。error finding 必须给出具体缺口、涉及产物和恢复动作。revisionRequest.kind 为 approved_reopen 时，必须检查 affectedWorkPackages 之外的 Work Package plan 保持当前批准值和顺序。legacyEvidence 只提供历史候选和问题索引，不具有当前 approval 权威，不能仅因新草案偏离旧 S2_TOP、旧 Unit 或旧 Plan 而报告 error。草案必须在每个开放 DecisionRequest 的 recommendation 下内部一致；备选项可能改变 Component、Interface 或 Work Package，由用户回答后触发新草案。不得仅因存在这种备选项报告 error。新增 decisionRequests 只允许覆盖高风险用户决策类别。可由 Agent 在 Package Design 中闭合的问题写 finding，不生成用户 DecisionRequest。最终只输出符合 Schema 的 JSON。
 
 Skill Context：
 ${skillContext}
@@ -680,7 +681,7 @@ ${PROJECT_READER_INSTRUCTION}
 
 读取 AGENTS.md、Architecture、System Design、批准的上游 Package Design、相关源码和测试。闭合接口字段、生产者、寄存边界、消费者、状态生命周期、同拍优先级、stall、flush、redirect、kill、retry、late response、reset、复用、不变量、组合路径、断言、定向测试和可执行命令。
 
-implementation 路径必须完整等于 Work Package 已批准路径。architectureReferences 和 sourceReferences 只能包含实际存在的项目相对路径。decisionRequests 只用于高风险用户决策；局部实现选择由你写入 Design。存在普通待设计问题时继续闭合，无法闭合的正确性缺口进入 openQuestions。自然语言使用简体中文，最终只输出符合 Schema 的 JSON。
+implementation 路径必须完整等于 Work Package 已批准路径。architectureReferences 和 sourceReferences 只能包含实际存在的项目相对路径。sharedInterfaceChanges 只记录相对当前已批准 System Design 的新增偏差。复述、细化或实现 System Design 已批准的 Interface owner、生产者、消费者、字段和时序关系不属于变化，此时 sharedInterfaceChanges 必须为 []，没有新偏差时 affectedWorkPackages 也必须为 []。decisionRequests 只用于高风险用户决策；局部实现选择由你写入 Design。存在普通待设计问题时继续闭合，无法闭合的正确性缺口进入 openQuestions。自然语言使用简体中文，最终只输出符合 Schema 的 JSON。
 
 Skill Context：
 ${skillContext}

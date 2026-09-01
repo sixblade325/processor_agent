@@ -98,15 +98,9 @@ export async function buildStage2ReadManifest(
       entryFiles.push(path);
     }
   }
-  const existingRoots: string[] = [];
-  for (const path of uniqueSorted(allowedRoots)) {
-    if (await pathExists(resolveWithin(root, path))) {
-      existingRoots.push(path);
-    }
-  }
   return finalizeReadManifest({
     entryFiles,
-    allowedRoots: existingRoots,
+    allowedRoots: uniqueSorted(allowedRoots),
     excludedRoots: DEFAULT_EXCLUDED_ROOTS,
     affectedIds,
     maxListedFiles: workPackage === undefined ? 250 : 100,
