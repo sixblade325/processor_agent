@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bootstrap Processor Project"
+  short_description: "安全初始化并维护处理器项目级 Agent 协作规则"
+  default_prompt: "Use $bootstrap-processor-project to create or safely compare the root AGENTS.md for this processor project."

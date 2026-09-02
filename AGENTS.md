@@ -9,8 +9,8 @@
 
 ## 2. 文档层级
 
-1. `PRODUCT_PLAN/PRODUCT_PLAN.md` 是产品总纲，维护产品目标、边界、整体架构、范围、里程碑和验收标准。
-2. `PRODUCT_PLAN/STAGE1.md`、`STAGE2.md` 和 `STAGE3.md` 分别维护对应阶段的权威计划。
+1. `PRODUCT_PLAN/V2/PRODUCT_PLAN.md` 是产品总纲，维护产品目标、边界、整体架构、范围、里程碑和验收标准。
+2. `PRODUCT_PLAN/V2/STAGE1.md`、`STAGE2.md` 和 `STAGE3.md` 分别维护对应阶段的权威计划。
 3. 阶段计划服从产品总纲，阶段内部流程以对应阶段计划为准。
 4. `idea/` 保存历史讨论、原始构想和图示，不承担正式产品事实。
 5. 同一事实只在一个权威文档中完整定义，其他文档使用摘要和链接。

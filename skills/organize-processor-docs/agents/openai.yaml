@@ -1,0 +1,4 @@
+interface:
+  display_name: "Organize Processor Docs"
+  short_description: "渐进建立并维护人类优先的处理器架构、设计、研究、审查与验证文档"
+  default_prompt: "Use $organize-processor-docs to establish or maintain a concise, human-first processor documentation framework."
