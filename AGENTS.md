@@ -24,7 +24,8 @@
 4. 通用逻辑不得硬编码 `dual_issue_demo` 或龙芯杯项目的模块名、信号名和流水级。
 5. 一个正式 Skill 只保留一份。
 6. 用户项目的人类可读文档默认使用中文，模块名、信号名、字段名、文件名、命令和代码保持英文。
-7. 新项目缺少 `AGENTS.md` 时生成严格协作约束，已有 `AGENTS.md` 默认保留并由用户确认是否升级。
+7. Windows PowerShell 读取 UTF-8 文档时必须使用 `Get-Content -Raw -Encoding utf8 -LiteralPath <path>` 或产品的 `scripts\read-text.cmd <path>`，不得依赖默认编码。
+8. 新项目缺少 `AGENTS.md` 时生成严格协作约束，已有 `AGENTS.md` 默认保留并由用户确认是否升级。
 
 ## 4. Skill 规则
 

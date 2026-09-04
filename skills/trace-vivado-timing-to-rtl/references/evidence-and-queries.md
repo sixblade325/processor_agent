@@ -4,8 +4,8 @@
 
 1. Run identity
 2. Artifact and source integrity
-3. Minimum routed reports
-4. Path-universe queries
+3. Evidence by task mode
+4. Whole-design path universe
 5. Directed path queries
 6. Primitive and net properties
 7. Family and boundary queries
@@ -28,26 +28,46 @@ routed DCP path and SHA256
 report command and report hash
 ```
 
-Bitstream completion does not prove setup or hold closure. A fixed routed DCP frequency calculation is an estimate tied to that placement and routing.
+Bitstream completion does not prove setup or hold closure. A fixed routed DCP
+frequency calculation is an estimate tied to that placement and routing.
 
 ## 2. Artifact and source integrity
 
-Preserve and hash:
+Preserve and hash the artifacts used by the claim:
 
 ```text
-routed DCP, bitstream, probes
-README, run_result, environment or configuration manifest
+routed DCP and relevant implementation outputs
+run result and configuration manifest
 source hash manifest and generated RTL file list
 constraints and Tcl scripts
-all raw timing, QoR, methodology, resource, and power reports
-supplemental query Tcl and output
+raw timing and supplemental query reports
 ```
 
-Check every source file used for semantic mapping against the run manifest. When a job modified an isolated copy, record the replacement script and use the routed hierarchy to confirm the instantiated variant. Never silently map a routed path through a newer checkout.
+Add QoR, methodology, utilization, power, congestion, clocking, and control-set
+reports only when the analysis uses them. Check each source file used for
+semantic mapping against the run manifest. Never silently map a routed path
+through a newer checkout.
 
-## 3. Minimum routed reports
+## 3. Evidence by task mode
 
-Collect:
+### Targeted Path Trace
+
+Minimum evidence:
+
+```text
+run identity and source integrity
+timing summary or equivalent closure context
+one full expanded path for each target
+exact directed query and object counts
+relevant generated RTL, Chisel source, Design, and constraints
+```
+
+Collect high-fanout, congestion, utilization, or methodology reports only when
+the target path or proposed explanation requires them.
+
+### Whole-design Timing Audit
+
+Start with:
 
 ```tcl
 open_checkpoint soc_top_routed.dcp
@@ -66,13 +86,24 @@ report_clock_utilization -file clock_utilization.rpt
 report_qor_assessment -file qor_assessment.rpt
 ```
 
-Also preserve `report_exceptions`, `report_methodology`, `report_drc`, `report_utilization`, hierarchical utilization, RAM utilization, power, congestion, clock interaction, CDC, pulse-width, and control-set reports.
+Also preserve applicable exception, methodology, DRC, utilization, hierarchical
+utilization, RAM, power, congestion, clock interaction, CDC, pulse-width, and
+control-set reports. Preserve intermediate DCPs when they are needed to separate
+netlist depth from placement and routing.
 
-When available, preserve post-synth, post-opt, post-place, post-physopt, and routed DCPs. They separate netlist depth changes from placement and route changes.
+### Cross-run Comparison
 
-## 4. Path-universe queries
+Use the Targeted set for a local before/after claim. Use the Whole-design set for
+a global claim. Query the same population, threshold, family classifier, and
+report properties in each run. Record every configuration difference before
+comparing metrics.
 
-Build a one-path-per-endpoint universe before selecting representative paths:
+## 4. Whole-design path universe
+
+This section is required only for Whole-design Timing Audit or a global
+Cross-run Comparison.
+
+Build one path per endpoint before selecting representatives:
 
 ```tcl
 set allEpWorst [get_timing_paths -delay_type max \
@@ -80,7 +111,7 @@ set allEpWorst [get_timing_paths -delay_type max \
 puts "ENDPOINT_WORST_COUNT=[llength $allEpWorst]"
 ```
 
-Use `list_property [lindex $allEpWorst 0]` before exporting fields. Preserve at least:
+Use `list_property [lindex $allEpWorst 0]` before exporting fields. Preserve:
 
 ```text
 startpoint, endpoint, slack, datapath delay
@@ -88,23 +119,21 @@ logic delay, route delay, levels
 clock group, endpoint pin type
 ```
 
-Record the query cap and returned count. Treat `returned == cap` as potentially truncated. Generate:
-
-1. Delay and Slack bins.
-2. Endpoint type counts for register D, CE, reset/set, BRAM address, enable, write enable, input, and output.
-3. One raw list sorted by Slack.
-4. One family summary built from actual startpoints and endpoints.
-
-The family maximum data delay and family worst Slack can come from different paths. Keep both identities.
+Record the query cap and returned count. Treat `returned == cap` as potentially
+truncated. Generate delay and Slack bins, endpoint-type counts, one raw
+Slack-sorted list, and one family summary derived from real startpoints and
+endpoints. Keep separate identities for family maximum data delay and family
+worst Slack.
 
 ## 5. Directed path queries
 
-Use exact hierarchy discovered from the routed netlist. Save object counts and warnings next to every query.
+Use exact hierarchy discovered from the routed netlist. Save object counts and
+warnings beside every query.
 
 ```tcl
 set fromPins [get_pins -hier -filter {REF_PIN_NAME =~ Q || REF_PIN_NAME =~ C} \
-  -regexp {.*predict.*updateSetReg.*}]
-set toPins [get_pins -hier -regexp {.*l1ic.*(D|CE|R|ENARDEN|ADDRARDADDR).*}]
+  -regexp {.*producer_pattern.*}]
+set toPins [get_pins -hier -regexp {.*consumer_pattern.*(D|CE|R|ENARDEN|ADDRARDADDR).*}]
 
 report_timing -from $fromPins -to $toPins -delay_type max \
   -max_paths 100 -nworst 20 -unique_pins \
@@ -112,32 +141,32 @@ report_timing -from $fromPins -to $toPins -delay_type max \
   -file directed_from_to.rpt
 ```
 
-Use `-through` only after confirming the object exists and is on the desired timing arc:
+Use `-through` only after confirming the object exists on the desired arc:
 
 ```tcl
-set throughPins [get_pins -hier -regexp {.*issueOH.*|.*hitOH.*}]
+set throughPins [get_pins -hier -regexp {.*selector_or_mask_pattern.*}]
 report_timing -through $throughPins -delay_type max \
   -max_paths 100 -nworst 20 -unique_pins \
   -path_type full_clock_expanded -input_pins \
-  -file through_issue_or_hit.rpt
+  -file directed_through.rpt
 ```
 
-For endpoint diversity, query registers, CE/reset pins, and memory pins separately. For startpoint diversity, run independent queries per state family instead of relying on one global top list.
-
-For module and pipeline coverage, query incoming, internal, outgoing, and through paths separately:
+Query register D, CE, reset, and memory pins separately when they define
+different boundaries. For module coverage, separate:
 
 ```text
 outside -> module endpoints
 module startpoints -> module endpoints
 module startpoints -> outside
-all paths through defining selector, mask, hit, or ready nets
+paths through defining selector, mask, hit, or ready nets
 ```
 
-Name a path family from the real startpoint and endpoint. A report named for LDQ can contain an upstream LSU path that merely ends inside LDQ.
+Name a family from the real startpoint and endpoint. Report filenames do not
+establish path ownership.
 
 ## 6. Primitive and net properties
 
-Obtain the timing path object first:
+Obtain the path object first:
 
 ```tcl
 set paths [get_timing_paths -from $fromPins -to $toPins \
@@ -149,7 +178,7 @@ report_timing -of_objects $p -path_type full_clock_expanded \
   -input_pins -file one_path_full.rpt
 ```
 
-For every ambiguous LUT:
+For an ambiguous LUT:
 
 ```tcl
 set c [get_cells -hier -filter {NAME == "<full-cell-name>"}]
@@ -170,51 +199,42 @@ foreach pin $outPins {
 }
 ```
 
-Property availability varies by Vivado version and object type. Run `list_property` before depending on a property name. Keep raw output when `INIT`, routed nodes, or timing arcs are unavailable.
-
-For every long route segment, retain driver cell/site, sink cell/site, net fanout, route delay, and hierarchy crossing. Query congestion and replication before assigning cause.
+Property availability varies by Vivado version and object type. Run
+`list_property` before depending on a property name. For long routes, retain
+driver and sink sites, fanout, route delay, and hierarchy crossing.
 
 ## 7. Family and boundary queries
 
-For a proposed registered intermediate, collect five groups:
+For a proposed registered intermediate, collect:
 
 ```text
 old source -> old consumers
 all state producers -> newReg.D
 newReg.Q -> all consumers
-state/update/release/flush -> maintenance feedback
-clock/reset/CE/flush -> newReg control pins
+state, update, release, and flush -> maintenance feedback
+clock, reset, CE, and flush -> newReg control pins
 ```
 
-For processor structures, also split:
+Split relevant processor structures by:
 
 ```text
-data path versus valid/control path
-entry state versus global pointer or mask
-candidate generation versus priority selection versus data mux
+data versus valid and control
+entry state versus pointer or mask
+candidate generation versus priority versus data mux
 RAM DOUT versus ADDR, EN, WE, DIN
 ready output versus ready-maintenance D path
 forwarding selector versus forwarding data
 ```
 
-For every group, save from/to/through expressions, expanded object counts, path count, report status, and raw report.
+For every group, save query expressions, expanded object counts, path count,
+report status, and raw report.
 
-For before/after comparisons, use this minimum matrix:
-
-```text
-same global closure metrics
-same endpoint-worst query and threshold
-same family classifier
-same representative source/end boundary when it still exists
-new producer-side D path
-new consumer-side Q path
-feedback, CE, reset, flush, and hold paths
-hierarchical utilization and power confidence
-```
+For a local before/after comparison, use the same representative source and
+endpoint plus all new boundary paths. For a global comparison, add the same
+endpoint-worst query, threshold, family classifier, closure metrics,
+hierarchical utilization, and power-confidence basis.
 
 ## 8. Evidence limits
-
-Use these labels:
 
 | Label | Required evidence |
 |---|---|
@@ -232,6 +252,5 @@ Do not claim:
 5. Maximum frequency from one fixed-DCP WNS calculation.
 6. A path is false from architectural intuition alone.
 7. A logic edit caused a route improvement from one implementation sample.
-8. A register cut is safe without measuring its producer-side D and maintenance cones.
-9. A high-fanout signal caused a path when it is absent from that path.
-10. The current checkout matches the implemented run without hash evidence.
+8. A register cut is safe without measuring producer D and maintenance cones.
+9. The current checkout matches the implemented run without hash evidence.

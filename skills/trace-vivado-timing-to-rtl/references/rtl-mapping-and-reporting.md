@@ -6,7 +6,7 @@
 2. Primitive interpretation
 3. Structural opportunity accounting
 4. Cross-run comparison
-5. Report template
+5. Mode-sized report templates
 6. Implementation handoff
 
 ## 1. Mapping procedure
@@ -104,101 +104,88 @@ Use source hashes and full physical chains to classify changes:
 | New family becomes WNS | bottleneck migration |
 | Resource delta without matching hierarchy identity | unassigned delta |
 
-## 5. Report template
+## 5. Mode-sized report templates
+
+Every report starts with this common core:
 
 ```markdown
-# <Configuration> Vivado timing analysis
+# <Scope> Vivado timing analysis
 
-## 1. Conclusions
+## Conclusions and claim scope
 
-Closure verdict, margin, threshold population, global WNS family, major improvements, new bottlenecks, and ranked next action.
+Answer, evidence population, confidence, and ranked next action.
 
-## 2. Run identity
+## Run and source identity
 
-| Field | Value |
-|---|---|
-| Raw run | ... |
-| Routed DCP SHA256 | ... |
-| Vivado and part | ... |
-| CPU clock | ... |
-| Source revision | ... |
-| Shell and top | ... |
-| Synthesis and implementation strategy | ... |
-| Architectural parameters | ... |
+Top, part, clocks, constraints, strategies, parameters, source revision,
+routed DCP hash, and dirty-state boundary.
 
-## 3. Evidence completeness
+## Evidence completeness
 
-Original delivery, supplemental DCP pulls, hashes, source-match boundary, query size, truncation, constraints, and missing artifacts.
+Artifacts used, exact queries, object counts, source-match boundary, and missing
+evidence.
 
-## 4. Comparable-run differences
+## Representative physical paths
 
-Configuration equality, RTL changes, closure, path population, topology migration, resources, and power confidence.
-
-## 5. Full path universe
-
-Delay bins, endpoint pin types, route-ratio distribution, violation count, object count, query cap, and truncation status.
-
-## 6. Raw Slack-tight paths
-
-| Rank | Slack | Data | Logic/Route | Levels | Source | Destination |
-|---:|---:|---:|---:|---:|---|---|
-
-Explain any difference between Slack order and data-delay order.
-
-## 7. Path-family summary
-
-| Family | Count | Data | Logic | Route | Levels | Worst slack |
-|---|---:|---:|---:|---:|---:|---:|
-
-State when `Data` and `Worst slack` come from different endpoints.
-
-## 8. Global WNS and limiting families
-
-Source, destination, requirement, slack, clock skew, uncertainty, and primitive counts.
-
-| Stage | Primitive | Cell/site | Logic/route ns | Fanout | Cumulative ns | RTL region | Confidence |
+| Stage | Primitive | Cell/site | Logic/route | Fanout | Cumulative | RTL region | Confidence |
 |---:|---|---|---:|---:|---:|---|---|
 
-## 9. Targeted boundary analysis
+## RTL and cycle mapping
 
-For every proposed precompute or register:
+Producer, consumer, register boundary, event meaning, hierarchy crossing, and
+measured, mapped, inferred, or unknown labels.
 
-| Boundary | Producer D | Consumer Q | Feedback | Control and hold | Result |
-|---|---:|---:|---:|---:|---|
+## Ranked directions
 
-Include shared prefixes, endpoint tails, the exact join point of side inputs, and remaining measured suffixes.
+Source location, covered boundary, removable levels, remaining suffix, new
+pressure, contract to prove, and uncertainty.
 
-## 10. High fanout, route, and implementation quality
+## Missing evidence and raw report index
 
-High-fanout paths, causal route segments, replication, congestion, route status, constraints, methodology, QoR, and `DONT_TOUCH`.
+Exact DCP queries and every raw artifact used.
 
-## 11. Resources and power
-
-Current hierarchy, comparable-run deltas, and power confidence.
-
-## 12. Candidate coverage
-
-| Candidate | Covered paths | Removed levels | Remaining suffix | New pressure | Contract to prove |
-|---|---:|---:|---:|---|---|
-
-## 13. Ranked directions
-
-Measured rationale, source location, expected structural change, and uncertainty.
-
-## 14. Missing evidence
-
-Exact DCP and Tcl commands.
-
-## 15. Raw report index
-
-Link every report, supplemental Tcl, extracted stage table, CSV, DCP, manifest, and hash file used.
-
-## 16. Implementation handoff
+## Implementation handoff
 
 Files, cycle contract, assertions, tests, and routed A/B query matrix.
 ```
 
-Keep the report answer-first. Put the full path universe before selected module narratives so absence claims remain auditable.
+For **Targeted Path Trace**, add only relevant sections:
+
+```text
+target selection and directed-query expansion
+producer D, consumer Q, feedback, control, and hold boundaries
+logic versus route diagnosis
+candidate coverage for the named path or family
+```
+
+Do not add a path-universe section unless the report makes a global claim.
+
+For **Whole-design Timing Audit**, add:
+
+```text
+global setup and hold closure
+full endpoint-worst universe, query cap, and truncation
+delay, Slack, endpoint-type, and route-ratio distributions
+raw Slack-tight list
+family counts, maximum data, worst Slack, and limiting representatives
+high-fanout, route, congestion, methodology, QoR, resources, and qualified power
+```
+
+Put the full path universe before module narratives so absence and ranking claims
+remain auditable.
+
+For **Cross-run Comparison**, add:
+
+```text
+configuration and source comparability matrix
+matching targeted paths or matching endpoint universes
+path-family migration and bottleneck movement
+logic, route, resource, and qualified power deltas supported by both runs
+implementation variance and unresolved attribution
+```
+
+Use local comparison sections for a targeted claim. Require the whole-design
+extensions only for a global comparison.
 
 ## 6. Implementation handoff
 

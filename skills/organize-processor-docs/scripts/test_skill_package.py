@@ -10,6 +10,12 @@ class SkillPackageTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.skill_root = Path(__file__).resolve().parents[1]
         cls.skill_text = (cls.skill_root / "SKILL.md").read_text(encoding="utf-8")
+        cls.bootstrap_text = (cls.skill_root / "references" / "bootstrap.md").read_text(
+            encoding="utf-8"
+        )
+        cls.design_text = (cls.skill_root / "references" / "design.md").read_text(
+            encoding="utf-8"
+        )
 
     def frontmatter(self) -> str:
         match = re.match(r"^---\n(.*?)\n---", self.skill_text, re.DOTALL)
@@ -92,6 +98,33 @@ class SkillPackageTest(unittest.TestCase):
         )
         self.assertIn("every explanatory raster diagram", self.skill_text)
         self.assertIn("Evidence captures", self.skill_text)
+
+    def test_canonical_document_layout_is_explicit(self) -> None:
+        self.assertIn("project-root `doc/`", self.skill_text)
+        self.assertIn("`doc/README.md` links directly", self.skill_text)
+        for path in (
+            "doc/Architecture/",
+            "doc/Design/",
+            "doc/Verification/",
+            "doc/Research/",
+        ):
+            self.assertIn(path, self.skill_text)
+        self.assertIn("## Canonical directory layout", self.bootstrap_text)
+        self.assertIn("Store raw logs", self.bootstrap_text)
+        self.assertIn("`.runtime/`", self.bootstrap_text)
+
+    def test_design_axis_tracks_physical_module_topology(self) -> None:
+        self.assertIn("## Physical module topology", self.design_text)
+        self.assertIn("Chisel or RTL structural hierarchy", self.design_text)
+        self.assertIn("responsibility boundaries", self.design_text)
+        self.assertIn("not post-placement physical layout", self.design_text)
+        self.assertIn("own module directory and `README.md`", self.design_text)
+        self.assertIn("Design-to-Source mapping", self.design_text)
+        self.assertIn("significant divergence requires user approval", self.design_text)
+        self.assertNotIn(
+            "Source and Design topology may differ physically",
+            self.design_text,
+        )
 
     def test_instruction_files_fit_context_budget(self) -> None:
         instruction_files = [self.skill_root / "SKILL.md"] + sorted(

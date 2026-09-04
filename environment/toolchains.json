@@ -1,0 +1,268 @@
+{
+  "schemaVersion": 1,
+  "supportedPlatforms": [
+    "windows"
+  ],
+  "architecture": "x86_64",
+  "executionBoundary": "windows-native",
+  "runtimeDirectory": ".runtime/processor-development-skills",
+  "chiselRuntime": {
+    "profiles": [
+      "chisel",
+      "all"
+    ],
+    "rootEnv": "PROCESSOR_SKILLS_MSYS2_ROOT",
+    "deriveRootFromTool": "verilator",
+    "deriveRootParents": 3,
+    "requiredPaths": [
+      {
+        "id": "chisel_which",
+        "label": "MSYS2 which.exe",
+        "relative": "usr/bin/which.exe",
+        "kind": "file",
+        "installHint": "Install the MSYS2 base utilities or set PROCESSOR_SKILLS_MSYS2_ROOT to the matching MSYS2 root."
+      },
+      {
+        "id": "chisel_shell",
+        "label": "MSYS2 sh.exe",
+        "relative": "usr/bin/sh.exe",
+        "kind": "file",
+        "installHint": "Install the MSYS2 base shell or set PROCESSOR_SKILLS_MSYS2_ROOT to the matching MSYS2 root."
+      },
+      {
+        "id": "verilator_root",
+        "label": "Verilator runtime root",
+        "relative": "ucrt64/share/verilator",
+        "kind": "directory",
+        "installHint": "Install the complete MSYS2 UCRT64 Verilator package."
+      }
+    ],
+    "pathPrepend": [
+      "ucrt64/bin",
+      "usr/bin"
+    ],
+    "environmentOverrides": {
+      "VERILATOR_ROOT": "ucrt64/share/verilator"
+    },
+    "environmentUnset": [
+      "SHELL",
+      "MAKESHELL"
+    ],
+    "firtool": {
+      "version": "1.155.0",
+      "overrideEnv": "CHISEL_FIRTOOL_PATH",
+      "cacheEnv": "LOCALAPPDATA",
+      "cacheRelative": "org.chipsalliance/llvm-firtool/cache/{version}/bin/firtool"
+    }
+  },
+  "profiles": {
+    "build": [
+      "python",
+      "git"
+    ],
+    "package": [
+      "python",
+      "git",
+      "codex"
+    ],
+    "chisel": [
+      "python",
+      "git",
+      "java",
+      "sbt",
+      "verilator",
+      "cxx",
+      "make"
+    ],
+    "vivado": [
+      "python",
+      "git",
+      "vivado"
+    ],
+    "all": [
+      "python",
+      "git",
+      "codex",
+      "java",
+      "sbt",
+      "verilator",
+      "cxx",
+      "make",
+      "vivado"
+    ]
+  },
+  "tools": [
+    {
+      "id": "python",
+      "label": "Python",
+      "commands": [
+        [
+          "$python",
+          "--version"
+        ]
+      ],
+      "versionRegex": "Python\\s+(\\d+(?:\\.\\d+){1,2})",
+      "minimumVersion": "3.10.0",
+      "installHint": "Install Python 3.10 or newer and make one interpreter available to the wrapper script."
+    },
+    {
+      "id": "git",
+      "label": "Git",
+      "commands": [
+        [
+          "git",
+          "--version"
+        ]
+      ],
+      "versionRegex": "git version\\s+(\\d+(?:\\.\\d+){1,3})",
+      "minimumVersion": "2.30.0",
+      "overrideEnv": "PROCESSOR_SKILLS_GIT",
+      "installHint": "Install Git 2.30 or newer and expose git on PATH."
+    },
+    {
+      "id": "codex",
+      "label": "Codex CLI",
+      "commands": [
+        [
+          "codex",
+          "--version"
+        ]
+      ],
+      "versionRegex": "codex-cli\\s+(\\d+(?:\\.\\d+){1,3})",
+      "capabilityCommands": [
+        [
+          "codex",
+          "plugin",
+          "--help"
+        ]
+      ],
+      "overrideEnv": "PROCESSOR_SKILLS_CODEX",
+      "installHint": "Install a Codex CLI release that provides the plugin command group."
+    },
+    {
+      "id": "java",
+      "label": "Java",
+      "commands": [
+        [
+          "java",
+          "-version"
+        ]
+      ],
+      "versionRegex": "(?:java|openjdk) version \\\"(\\d+(?:\\.\\d+){0,3})",
+      "minimumVersion": "17.0.0",
+      "overrideEnv": "PROCESSOR_SKILLS_JAVA",
+      "derivedCandidates": [
+        {
+          "env": "JAVA_HOME",
+          "relative": "bin/java.exe"
+        }
+      ],
+      "installHint": "Install a JDK 17 or newer supported by the target Chisel project."
+    },
+    {
+      "id": "sbt",
+      "label": "sbt",
+      "commands": [
+        [
+          "sbt",
+          "--script-version"
+        ]
+      ],
+      "versionRegex": "(\\d+\\.\\d+\\.\\d+)",
+      "minimumVersion": "1.9.0",
+      "overrideEnv": "PROCESSOR_SKILLS_SBT",
+      "derivedCandidates": [
+        {
+          "env": "SBT_HOME",
+          "relative": "bin/sbt.bat"
+        }
+      ],
+      "installHint": "Install an sbt launcher compatible with the target project."
+    },
+    {
+      "id": "verilator",
+      "label": "Verilator",
+      "commands": [
+        [
+          "verilator_bin.exe",
+          "--version"
+        ],
+        [
+          "verilator",
+          "--version"
+        ]
+      ],
+      "versionRegex": "Verilator\\s+(\\d+(?:\\.\\d+){1,2})",
+      "minimumVersion": "5.0.0",
+      "overrideEnv": "PROCESSOR_SKILLS_VERILATOR",
+      "derivedCandidates": [
+        {
+          "env": "PROCESSOR_SKILLS_MSYS2_ROOT",
+          "relative": "ucrt64/bin/verilator_bin.exe"
+        }
+      ],
+      "installHint": "Install Verilator 5 or newer for Windows. MSYS2 UCRT64 is supported as an internal Windows toolchain when its executable path is explicitly configured."
+    },
+    {
+      "id": "cxx",
+      "label": "C++ compiler",
+      "commands": [
+        [
+          "g++.exe",
+          "--version"
+        ]
+      ],
+      "versionRegex": "(?:g\\+\\+|GCC).*?(\\d+(?:\\.\\d+){1,2})",
+      "overrideEnv": "PROCESSOR_SKILLS_CXX",
+      "derivedCandidates": [
+        {
+          "env": "PROCESSOR_SKILLS_MSYS2_ROOT",
+          "relative": "ucrt64/bin/g++.exe"
+        }
+      ],
+      "installHint": "Install a Windows C++ compiler compatible with the selected Verilator toolchain."
+    },
+    {
+      "id": "make",
+      "label": "Make",
+      "commands": [
+        [
+          "mingw32-make.exe",
+          "--version"
+        ],
+        [
+          "make.exe",
+          "--version"
+        ]
+      ],
+      "versionRegex": "GNU Make\\s+(\\d+(?:\\.\\d+){1,2})",
+      "overrideEnv": "PROCESSOR_SKILLS_MAKE",
+      "derivedCandidates": [
+        {
+          "env": "PROCESSOR_SKILLS_MSYS2_ROOT",
+          "relative": "ucrt64/bin/mingw32-make.exe"
+        }
+      ],
+      "installHint": "Install GNU Make in the same Windows toolchain as Verilator and the C++ compiler."
+    },
+    {
+      "id": "vivado",
+      "label": "Vivado",
+      "commands": [
+        [
+          "vivado",
+          "-version"
+        ]
+      ],
+      "versionRegex": "Vivado\\s+v?(\\d{4}\\.\\d+)",
+      "overrideEnv": "PROCESSOR_SKILLS_VIVADO",
+      "derivedCandidates": [
+        {
+          "env": "XILINX_VIVADO",
+          "relative": "bin/vivado.bat"
+        }
+      ],
+      "installHint": "Install Vivado separately, configure its license, and expose the selected release to the invoking environment."
+    }
+  ]
+}

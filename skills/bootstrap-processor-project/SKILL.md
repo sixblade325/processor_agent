@@ -13,6 +13,8 @@ Create one human-editable, project-owned `AGENTS.md` at the processor project ro
 
 Read [assets/AGENTS.md](assets/AGENTS.md) completely before drafting or comparing a project file. Treat it as a maintained output template. It becomes project authority only after the user accepts it or it is written into a project that lacks `AGENTS.md` under an explicit bootstrap request.
 
+On Windows PowerShell, read UTF-8 project documents with `Get-Content -Raw -Encoding utf8 -LiteralPath <path>`. Never depend on the Windows PowerShell 5.1 default file encoding. Apply this rule before inspecting an existing `AGENTS.md` and throughout the bootstrap task.
+
 ## Boundary
 
 1. This skill may create or revise only the target project's root `AGENTS.md`.

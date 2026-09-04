@@ -588,11 +588,27 @@ def find_entry(root: Path) -> Path | None:
     return entries[0] if len(entries) == 1 else None
 
 
-def auto_roots(project: Path) -> list[tuple[Path, str]]:
-    by_name = {
-        path.name.lower(): path for path in project.iterdir() if path.is_dir()
+def child_directories(parent: Path) -> dict[str, Path]:
+    if not parent.is_dir():
+        return {}
+    return {
+        path.name.lower(): path for path in parent.iterdir() if path.is_dir()
     }
+
+
+def roots_below(parent: Path) -> list[tuple[Path, str]]:
+    by_name = child_directories(parent)
     return [(by_name[kind], kind) for kind in ROOT_KINDS if kind in by_name]
+
+
+def find_doc_root(project: Path) -> Path | None:
+    return child_directories(project).get("doc")
+
+
+def auto_roots(project: Path) -> list[tuple[Path, str]]:
+    doc_root = find_doc_root(project)
+    canonical = roots_below(doc_root) if doc_root else []
+    return canonical or roots_below(project)
 
 
 def requested_roots(project: Path, roots: Iterable[str]) -> list[tuple[Path, str]]:
@@ -625,11 +641,51 @@ def check_project(
     failed_paths: set[Path] = set()
     links_by_source: dict[Path, set[Path]] = {}
 
-    roots = (
-        requested_roots(project, root_args or [])
-        if root_args
-        else auto_roots(project)
-    )
+    custom_layout = bool(root_args)
+    doc_root = find_doc_root(project)
+    canonical_roots = roots_below(doc_root) if doc_root else []
+    legacy_roots = roots_below(project)
+    if custom_layout:
+        roots = requested_roots(project, root_args or [])
+        layout = "custom"
+    elif canonical_roots:
+        roots = canonical_roots
+        layout = "doc"
+        canonical_kinds = {kind for _, kind in canonical_roots}
+        for legacy_root, kind in legacy_roots:
+            if kind in canonical_kinds:
+                issues.append(
+                    issue(
+                        "duplicate_document_root",
+                        legacy_root,
+                        project,
+                        f"Both doc/{legacy_root.name} and top-level {legacy_root.name} exist for the {kind} domain",
+                    )
+                )
+            else:
+                issues.append(
+                    issue(
+                        "document_root_outside_doc",
+                        legacy_root,
+                        project,
+                        f"Move the {kind} domain under doc/ after user-approved migration; mixed canonical and top-level layouts are forbidden",
+                    )
+                )
+    elif legacy_roots:
+        roots = legacy_roots
+        layout = "legacy_top_level"
+        issues.append(
+            issue(
+                "noncanonical_document_layout",
+                project,
+                project,
+                "Current document roots are outside doc/; preserve them until a user-approved migration moves them under doc/",
+                severity="warning",
+            )
+        )
+    else:
+        roots = []
+        layout = "none"
 
     if not roots:
         issues.append(
@@ -637,22 +693,26 @@ def check_project(
                 "no_document_roots",
                 project,
                 project,
-                "No Architecture, Design, Verification, or Research document root was found",
+                "No doc/Architecture, doc/Design, doc/Verification, or doc/Research root was found; use --root for an approved custom layout",
             )
         )
 
-    for directory in sorted(path for path in project.iterdir() if path.is_dir()):
-        if is_parallel_design_root(directory.name):
-            issues.append(
-                issue(
-                    "duplicate_current_tree",
-                    directory,
-                    project,
-                    "Parallel candidate, backup, old, or versioned Design root is forbidden",
+    design_parents = [project]
+    if doc_root is not None:
+        design_parents.append(doc_root)
+    for parent in design_parents:
+        for directory in sorted(path for path in parent.iterdir() if path.is_dir()):
+            if is_parallel_design_root(directory.name):
+                issues.append(
+                    issue(
+                        "duplicate_current_tree",
+                        directory,
+                        project,
+                        "Parallel candidate, backup, old, or versioned Design root is forbidden",
+                    )
                 )
-            )
 
-    all_files: list[Path] = []
+    files_to_scan: dict[Path, str] = {}
     valid_roots: list[tuple[Path, str]] = []
 
     for root, kind in roots:
@@ -679,7 +739,8 @@ def check_project(
 
         valid_roots.append((root, kind))
         files = sorted(path.resolve() for path in root.rglob("*.md") if path.is_file())
-        all_files.extend(files)
+        for path in files:
+            files_to_scan.setdefault(path, kind)
 
         if find_entry(root) is None:
             issues.append(
@@ -702,100 +763,133 @@ def check_project(
                     )
                 )
 
-        for path in files:
-            links_by_source.setdefault(path, set())
-            text = read_markdown_text(
+    doc_entry: Path | None = None
+    if layout == "doc" and doc_root is not None:
+        doc_entry = find_entry(doc_root)
+        if doc_entry is None:
+            issues.append(
+                issue(
+                    "missing_doc_entry",
+                    doc_root,
+                    project,
+                    "Canonical doc/ must contain exactly one README.md overall entry",
+                )
+            )
+        else:
+            doc_entry = doc_entry.resolve()
+            files_to_scan.setdefault(doc_entry, "generic")
+
+    for path, kind in sorted(
+        files_to_scan.items(), key=lambda item: path_text(item[0], project)
+    ):
+        links_by_source.setdefault(path, set())
+        text = read_markdown_text(
+            path,
+            project,
+            issues,
+            text_cache,
+            failed_paths,
+        )
+        if text is None:
+            continue
+        effective_chars = sum(1 for character in text if not character.isspace())
+        non_blank_lines = sum(1 for line in text.splitlines() if line.strip())
+        profile = document_profile(path, kind)
+        budget = budgets[profile]
+
+        measurements.append(
+            {
+                "path": path_text(path, project),
+                "profile": profile,
+                "effectiveChars": effective_chars,
+                "nonBlankLines": non_blank_lines,
+                "targetEffectiveChars": budget.target_effective_chars,
+                "targetNonBlankLines": budget.target_non_blank_lines,
+                "hardEffectiveChars": budget.hard_effective_chars,
+                "hardNonBlankLines": budget.hard_non_blank_lines,
+            }
+        )
+
+        append_budget_finding(
+            issues,
+            path,
+            project,
+            profile,
+            "effective_chars",
+            effective_chars,
+            budget.target_effective_chars,
+            budget.hard_effective_chars,
+            hard_limit_policy,
+        )
+        append_budget_finding(
+            issues,
+            path,
+            project,
+            profile,
+            "non_blank_lines",
+            non_blank_lines,
+            budget.target_non_blank_lines,
+            budget.hard_non_blank_lines,
+            hard_limit_policy,
+        )
+
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if CONFLICT_RE.match(line):
+                issues.append(
+                    issue(
+                        "conflict_marker",
+                        path,
+                        project,
+                        "Unresolved merge conflict marker",
+                        line_number,
+                    )
+                )
+
+        for line_number, target, is_image in parse_links(text):
+            resolved = resolve_local_target(
                 path,
+                target,
                 project,
+                line_number,
                 issues,
+                anchor_cache,
                 text_cache,
                 failed_paths,
             )
-            if text is None:
-                continue
-            effective_chars = sum(1 for character in text if not character.isspace())
-            non_blank_lines = sum(1 for line in text.splitlines() if line.strip())
-            profile = document_profile(path, kind)
-            budget = budgets[profile]
-
-            measurements.append(
-                {
-                    "path": path_text(path, project),
-                    "profile": profile,
-                    "effectiveChars": effective_chars,
-                    "nonBlankLines": non_blank_lines,
-                    "targetEffectiveChars": budget.target_effective_chars,
-                    "targetNonBlankLines": budget.target_non_blank_lines,
-                    "hardEffectiveChars": budget.hard_effective_chars,
-                    "hardNonBlankLines": budget.hard_non_blank_lines,
-                }
-            )
-
-            append_budget_finding(
-                issues,
-                path,
-                project,
-                profile,
-                "effective_chars",
-                effective_chars,
-                budget.target_effective_chars,
-                budget.hard_effective_chars,
-                hard_limit_policy,
-            )
-            append_budget_finding(
-                issues,
-                path,
-                project,
-                profile,
-                "non_blank_lines",
-                non_blank_lines,
-                budget.target_non_blank_lines,
-                budget.hard_non_blank_lines,
-                hard_limit_policy,
-            )
-
-            for line_number, line in enumerate(text.splitlines(), start=1):
-                if CONFLICT_RE.match(line):
-                    issues.append(
-                        issue(
-                            "conflict_marker",
-                            path,
-                            project,
-                            "Unresolved merge conflict marker",
-                            line_number,
-                        )
+            if (
+                resolved
+                and is_image
+                and resolved.is_file()
+                and resolved.suffix.lower() in RASTER_DIAGRAM_SUFFIXES
+                and not is_evidence_capture(path, resolved, project)
+                and not has_editable_diagram_source(resolved)
+            ):
+                issues.append(
+                    issue(
+                        "missing_editable_diagram_source",
+                        path,
+                        project,
+                        f"Explanatory raster diagram lacks a same-stem editable source: {target!r}",
+                        line_number,
                     )
-
-            for line_number, target, is_image in parse_links(text):
-                resolved = resolve_local_target(
-                    path,
-                    target,
-                    project,
-                    line_number,
-                    issues,
-                    anchor_cache,
-                    text_cache,
-                    failed_paths,
                 )
-                if (
-                    resolved
-                    and is_image
-                    and resolved.is_file()
-                    and resolved.suffix.lower() in RASTER_DIAGRAM_SUFFIXES
-                    and not is_evidence_capture(path, resolved, project)
-                    and not has_editable_diagram_source(resolved)
-                ):
-                    issues.append(
-                        issue(
-                            "missing_editable_diagram_source",
-                            path,
-                            project,
-                            f"Explanatory raster diagram lacks a same-stem editable source: {target!r}",
-                            line_number,
-                        )
-                    )
-                if resolved and resolved.is_file() and resolved.suffix.lower() == ".md":
-                    links_by_source[path].add(resolved.resolve())
+            if resolved and resolved.is_file() and resolved.suffix.lower() == ".md":
+                links_by_source[path].add(resolved.resolve())
+
+    if doc_entry is not None and doc_entry not in failed_paths:
+        linked_entries = links_by_source.get(doc_entry, set())
+        for root, _ in valid_roots:
+            domain_entry = find_entry(root)
+            if domain_entry is None or domain_entry.resolve() in linked_entries:
+                continue
+            issues.append(
+                issue(
+                    "document_domain_not_linked",
+                    doc_entry,
+                    project,
+                    f"Overall entry must link directly to {path_text(domain_entry, project)}",
+                )
+            )
 
     for root, kind in valid_roots:
         entry = find_entry(root)
@@ -855,8 +949,9 @@ def check_project(
 
     return {
         "project": str(project),
+        "layout": layout,
         "roots": [path_text(root, project) for root, _ in valid_roots],
-        "filesChecked": len(set(all_files)),
+        "filesChecked": len(files_to_scan),
         "hardLimitPolicy": hard_limit_policy,
         "measurements": measurements,
         "issues": issues,

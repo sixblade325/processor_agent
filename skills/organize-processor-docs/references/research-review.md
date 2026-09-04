@@ -16,7 +16,7 @@ Cover:
 6. adopted conclusions linked from their Architecture or Design authority;
 7. unresolved evidence gaps.
 
-When maintained as a project root, `Research/README.md` maps questions to reports and adopted authority links. Research remains support material after adoption.
+When maintained by the project, `doc/Research/README.md` maps questions to reports and adopted authority links. Research remains support material after adoption.
 
 ## Review
 

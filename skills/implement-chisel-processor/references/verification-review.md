@@ -2,7 +2,10 @@
 
 ## Primary verification
 
-Use Verilator by default. Put tests only at approved test paths and put raw logs at the Task Envelope's evidence location. Record the exact command and random seed.
+Use Verilator by default. Put tests only at project-approved test paths. Put raw
+logs, generated binaries, waveforms, and transient reports under the project's
+Runtime path unless repository instructions designate another evidence path.
+Record the exact command, working directory, tool version, and random seed.
 
 Cover applicable cases:
 
@@ -29,7 +32,7 @@ Select applicable levels from:
 4. complete Backend or CPU functional/difftest.
 
 Run every affected and available level before delivery. The order may change
-when an independently runnable higher-level harness provides earlier feedback.
+when an independently runnable higher-level test provides earlier feedback.
 A pass at one level does not close another. ABI or shared-package changes must
 use the real dependent source set and rerun affected downstream levels.
 
@@ -81,7 +84,9 @@ Record:
 
 ## Static review
 
-Provide design paths, source paths, tests, and acceptance criteria. Ask it to return findings ordered by severity with file and line references. Require checks for:
+Inspect the fixed baseline, Design paths, source paths, tests, and acceptance
+criteria. Return findings ordered by severity with file and line references.
+Require checks for:
 
 - mismatch between target documents and implementation;
 - redundant conditions, overprotection, or invented protocol;
@@ -91,8 +96,25 @@ Provide design paths, source paths, tests, and acceptance criteria. Ask it to re
 
 ## Verification review
 
-Provide source and test paths plus commands, without the primary agent's expected verdict. Require an independent run and a short report containing backend, seed, cycle count, pass/fail, log path, and uncovered behavior.
+Run the approved source and test paths with the exact recorded commands. A short
+report contains backend, tool version, seed, cycle count, pass/fail, log path,
+and uncovered behavior.
+
+## Optional dual-subagent mode
+
+This mode is off unless the user explicitly requests dual-subagent verification
+for the current task. When enabled:
+
+1. Give the static-review subagent Design paths, source paths, tests, acceptance criteria, and the fixed baseline. Its role is read-only.
+2. Give the verification subagent source paths, test paths, commands, acceptance criteria, and the fixed baseline without the active Agent's expected verdict.
+3. Keep both reports independent until the active Agent receives them.
+4. Store raw logs under Runtime and place formal review material only where project instructions or the user require it.
+5. If both roles cannot run independently, state the limitation and classify the result as active-Agent verification.
 
 ## Evidence ownership
 
-Follow the Task Envelope for evidence paths and output format. Do not create standalone review documents when the Harness projects both reviews into one module verification record. After fixes, rerun every affected directed test and the relevant stress test. Preserve failure logs when they explain a resolved bug; ignore generated logs in Git when repository policy requires it.
+Follow project `AGENTS.md` for evidence paths and output format. Do not create a
+standalone review document unless the project workflow or user requests one.
+After fixes, rerun every affected directed test and the relevant stress test.
+Preserve failure logs when they explain a resolved bug. Keep generated logs out
+of Git when repository policy requires it.

@@ -41,11 +41,11 @@ python <skill-dir>/scripts/check_docs.py <project-root>
 python <skill-dir>/scripts/check_docs.py <project-root> --json
 ```
 
-The checker scans existing Architecture, Design, Verification, and Research roots case-insensitively. Use repeated `--root <path>` for custom document roots.
+The checker prefers `doc/Architecture/`, `doc/Design/`, `doc/Verification/`, and optional `doc/Research/`, discovered case-insensitively. A wholly legacy top-level layout produces a migration warning. Mixing canonical and top-level domain roots is an error, including different domains and parallel copies of the same domain. Use repeated `--root <path>` for an explicitly approved custom document layout.
 
 It checks:
 
-1. entry `README.md` presence;
+1. `doc/README.md`, domain entry presence, and direct links from the overall entry to every present domain;
 2. target and provisional hard character and nonblank-line budgets;
 3. local file and Markdown heading links;
 4. document reachability and Architecture or Design reading paths deeper than two links;
@@ -76,19 +76,22 @@ The Agent must separately check:
 1. one authority body per normative fact;
 2. Architecture properties separated from Design realization;
 3. overview summaries aligned with topic authorities;
-4. module state and Protocol field ownership;
-5. Chisel-facing interfaces presented as minimal Scala declarations followed by field semantics in declaration order;
-6. non-interface Scala limited to decisive structure that needs code-level precision;
-7. complete Lifecycle terminal paths and safe reuse;
-8. implemented Design linked concisely to relevant Source and Test locations;
-9. explanatory raster diagrams paired with maintained editable sources, and evidence captures bound to an input commit, run or method, and evidence location;
-10. ADR decisions aligned with current documents;
-11. Research observations separated from inference and linked to adopted authorities;
-12. Review and Finding bound to a frozen subject with evidence and uncovered scope;
-13. Verification coverage for Architecture acceptance and Design invariants;
-14. stale names, rejected mechanisms, dead links, and orphan concepts;
-15. reading paths that stay within two links from the appropriate entry;
-16. direct readability without Harness data.
+4. correspondence between the Design module axis and stable Chisel or RTL instance and responsibility topology;
+5. an explicit reason, maintenance consequence, user approval, and Design ADR for every significant topology divergence;
+6. independent module authorities for stable instantiated modules that own responsibility, state, interfaces, or an independent maintenance lifecycle;
+7. module state and Protocol field ownership;
+8. Chisel-facing interfaces presented as minimal Scala declarations followed by field semantics in declaration order;
+9. non-interface Scala limited to decisive structure that needs code-level precision;
+10. complete Lifecycle terminal paths and safe reuse;
+11. implemented Design linked concisely to relevant Source and Test locations;
+12. explanatory raster diagrams paired with maintained editable sources, and evidence captures bound to an input commit, run or method, and evidence location;
+13. ADR decisions aligned with current documents;
+14. Research observations separated from inference and linked to adopted authorities;
+15. Review and Finding bound to a frozen subject with evidence and uncovered scope;
+16. Verification coverage for Architecture acceptance and Design invariants;
+17. stale names, rejected mechanisms, dead links, and orphan concepts;
+18. reading paths that stay within two links from the appropriate entry;
+19. direct readability without Harness data.
 
 ## Change report
 
@@ -96,7 +99,8 @@ Report:
 
 1. files created, modified, relocated, merged, or retired;
 2. facts whose authority moved;
-3. reading paths changed;
-4. length before and after for affected files;
-5. deterministic command and result;
-6. semantic findings and remaining user decisions.
+3. Design-to-Source topology mappings or exceptions changed;
+4. reading paths changed;
+5. length before and after for affected files;
+6. deterministic command and result;
+7. semantic findings and remaining user decisions.

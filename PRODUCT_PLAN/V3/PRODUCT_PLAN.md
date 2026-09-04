@@ -42,6 +42,8 @@ Processor Agent V3 的产品单位是可安装、可组合、可验证的处理�
 7. `doctor`、固定工具入口和确定性检查脚本。
 8. Codex plugin manifest、可复现安装包和工具级测试。
 
+当前产品环境固定为纯 Windows x86-64。MSYS2 UCRT64 只作为 Windows 内部工具链，不形成 WSL 或 Linux 运行环境。
+
 ## 4. 职责边界
 
 ### 4.1 设计师
@@ -217,6 +219,8 @@ processor-development-skills/
 4. 可复现安装包。
 5. 工具级测试。
 
+用户初始化必须提供一个 Windows 一键命令。该命令连续完成环境预检、产品校验、工具级测试、可复现构建和 Codex plugin 安装。
+
 Skill 行为 eval、最小处理器示例和 A/B 对照演示属于实验资产，不构成产品运行条件。详细交付边界和验收见 [可运行产品与实验资产边界](RUNNABLE_PRODUCT_AND_EXPERIMENT_BOUNDARY.md)。
 
 ## 11. 实验性演示闭环
@@ -238,7 +242,7 @@ Skill 行为 eval、最小处理器示例和 A/B 对照演示属于实验资产�
 
 ## 12. 验收标准
 
-1. 新用户可以按照 `README.md` 安装 Skill Package。
+1. 新用户可以按照 `README.md` 在 Windows 上运行一个命令完成 Skill Package 的检查、构建和安装。
 2. Codex 可以发现并调用全部正式 Skill。
 3. `doctor` 可以报告环境、工具版本和缺失项。
 4. Skill 依赖的重复性工程命令具有固定入口和明确退出状态。

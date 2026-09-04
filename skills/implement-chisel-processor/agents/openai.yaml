@@ -1,4 +1,4 @@
 interface:
   display_name: "Implement Chisel Processor"
   short_description: "文档驱动的 Chisel 处理器实现、审查与验证流程"
-  default_prompt: "Use $implement-chisel-processor to implement this processor module from the maintained design documents and complete review and Verilator validation."
+  default_prompt: "Use $implement-chisel-processor to implement this processor module directly from maintained Architecture and Design, update every affected source-adjacent _codex.md summary, and complete focused Verilator validation. Keep dual-subagent verification disabled unless the user explicitly requests it."

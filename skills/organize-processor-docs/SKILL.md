@@ -13,7 +13,7 @@ Build a directly editable Markdown document network that a processor designer ca
 
 1. Read the project `AGENTS.md` first.
 2. Treat explicit user decisions and the current Git authorities as authoritative. Treat a later user statement as change intent unless the user clearly supersedes an existing fact.
-3. Keep one current `Architecture/`, one current `Design/`, and one current `Verification/` when those roots are present. Git keeps history. Research, Review, and Finding remain evidence rather than processor authority.
+3. Keep the current document network under one project-root `doc/`. Use one current `doc/Architecture/`, one current `doc/Design/`, and one current `doc/Verification/` when those domains contain real material. Use `doc/Research/` only when project-maintained research exists. Git keeps history. Research, Review, and Finding remain evidence rather than processor authority.
 4. Give each normative fact one owning document. Summaries link to the owner and add no new normative detail.
 5. Keep Research, reference implementations, current RTL, current proposed documents, and new recommendations distinct.
 6. Do not introduce a document manifest, processor schema, renderer-owned truth, backup tree, or document workflow state.
@@ -21,6 +21,7 @@ Build a directly editable Markdown document network that a processor designer ca
 8. Explain every Chisel-facing interface in `Scala declaration -> semantics` order. Show the minimal Scala structure first, then explain fields in declaration order.
 9. Outside interface declarations, use Scala only when prose, a table, or a diagram cannot express the required hardware structure precisely. Keep only the minimal decisive fragment.
 10. Keep a same-stem editable source beside every explanatory raster diagram and update both in the same candidate change. Evidence captures such as waveforms and tool screenshots do not require an editable diagram source; bind them to the input commit, run or method, and evidence location.
+11. Use the physical module view in `doc/Design/` as the main directory axis. Align this view as closely as possible with stable Chisel or RTL instance hierarchy and responsibility boundaries. Keep Protocols, Lifecycles, ADRs, and Verification as orthogonal views linked to that axis.
 
 When detailed processor semantics are being designed or reviewed, also use `design-chisel-processor`. This skill owns information architecture and writing constraints; `design-chisel-processor` owns cycle-accurate correctness.
 
@@ -77,12 +78,14 @@ These budgets are a writing strategy pending validation against real processor p
 
 1. A human can understand every document without reading machine state or generated schemas.
 2. Every document opens with its responsibility, scope, and owned facts in natural language.
-3. Any Architecture property is reachable from `Architecture/README.md` within two document links.
-4. Any module, Protocol, or Lifecycle is reachable from `Design/README.md` within two document links.
-5. An implemented Design document links its relevant Source and Test locations without copying their topology.
-6. Verification material links to the Architecture property or Design invariant it checks.
-7. Every explanatory raster diagram retains a same-stem editable source. Evidence captures identify their input commit, run or method, and evidence location.
-8. Removing `.assistant/` leaves the formal documentation complete and readable.
-9. Direct user edits remain first-class input and are not overwritten from another representation.
+3. `doc/README.md` links directly to every present domain entry.
+4. Any Architecture property is reachable from `doc/Architecture/README.md` within two document links.
+5. Any module, Protocol, or Lifecycle is reachable from `doc/Design/README.md` within two document links.
+6. The Design module view accounts for every stable implemented module responsibility and records justified differences from the Chisel or RTL instance hierarchy.
+7. An implemented Design document links its relevant Source and Test locations without copying source bodies.
+8. Verification material links to the Architecture property or Design invariant it checks.
+9. Every explanatory raster diagram retains a same-stem editable source. Evidence captures identify their input commit, run or method, and evidence location.
+10. Removing `.assistant/` leaves the formal documentation complete and readable.
+11. Direct user edits remain first-class input and are not overwritten from another representation.
 
 Use [references/maintenance.md](references/maintenance.md) for deterministic commands, semantic audit, and change-report fields.

@@ -11,7 +11,7 @@ Optimize from cycle contracts and implementation evidence. Treat a source edit a
 
 1. Read repository instructions, design documents, current RTL, module-local notes, tests, and existing timing reports.
 2. Separate target behavior, current implementation, reference implementation, and proposed optimization.
-3. Freeze the requested edit boundary. Preserve backups and independent experiment directories.
+3. Freeze the requested edit boundary and baseline. Put generated experiments and raw evidence in the project Runtime path.
 4. Record source revision, configuration, clock constraint, synthesis and implementation strategy, seed, DCP identity, and report paths.
 
 Do not add pipeline latency, table-entry fields, interfaces, or conservative guards without authorization. A timing edit that changes fire timing, ordering, visible latency, or flush behavior is a microarchitecture change and requires explicit approval.
@@ -69,27 +69,15 @@ Read [vivado-evidence.md](references/vivado-evidence.md) before making measured 
 
 ## Select the smallest topology change
 
-Read [rtl-patterns.md](references/rtl-patterns.md), then choose the narrowest applicable pattern:
+Read only the reference categories matched by the measured path. Read multiple
+categories when the path crosses their boundaries.
 
-|Observed topology|Preferred first experiment|
+|Measured topology|Reference|
 |---|---|
-|Current bank state plus phase mux drives `valid` or `ready`|Expose next-state availability and register the next mapped result|
-|Priority selection plus age wrap sits on an output path|Register priority results computed from the same next-state version as the entries|
-|Wide line or Bundle mux precedes narrow extraction|Extract required slices in parallel, then mux the narrow values|
-|A wide mux precedes the same pure transform on either selected value|Apply the transform to each candidate in parallel, then mux the narrower results|
-|Full-width equality or transport is only needed inside a known address or identity region|Carry and compare a compact representation plus an explicit alias-boundary guard|
-|Aligned `Mux1H` results feed a shared arithmetic operation, and the selector is derived from the same late source|Compute the operation per candidate in parallel, then use the one-hot selector on the final results|
-|Late forwarding or override data is selected before an operation-class mux|Build the ordinary class-selected base in parallel, then use the late candidate as one qualified final override|
-|Global tag or ROB-head compare feeds every issue candidate|Capture a local per-entry predicate one cycle earlier|
-|A registered update is reconstructed from stable identity fields plus a late acceptance signal|Register the stable update identity at its producer boundary and keep only the late acceptance gate combinational|
-|Small fixed dispatch width uses `PopCount`, dynamic shifts, or serial selection|Enumerate fixed count classes and precompute OH rotations|
-|An invalid-lane condition only affects admission|Remove it only after proving every state mutation remains fire-gated|
-|A late transaction-valid signal drives synchronous RAM read enable, while unused read data has no side effect|Drive the read from stable port ownership and qualify all downstream state changes with the separately pipelined valid|
-|A rare global flush or recovery event has a long combinational source-to-consumer path, and consumers can legally observe it one cycle later|Register the complete event bundle, delay all coupled payloads together, and prove the intervening cycle cannot create an irreversible side effect|
-|An already registered flush or global control has route-dominated fanout across distant consumer regions|Create same-edge registered replicas, partition consumers by physical region, and verify that synthesis preserved the replicas|
-|Zero-mask special case wraps `PriorityEncoderOH`|Use the encoder's natural zero output|
-|`Mux(selOH.orR, Mux1H(selOH, data), 0.U)` wraps a one-hot-or-zero selector|Use `Mux1H` directly after proving zero-hot must produce zero and the outer predicate adds no kill or hold semantics|
-|Wide internal Bundle carries unused fields|Rely on firtool dead-code elimination after checking emitted RTL|
+|Mux width, pure transform, compact comparison, late override, one-hot zero behavior, or DCE|[combinational-data-patterns.md](references/combinational-data-patterns.md)|
+|Next-state availability, age priority, registered consumer view, local predicate, or stable update identity|[register-boundary-patterns.md](references/register-boundary-patterns.md)|
+|Fixed-width allocation, admission gating, queue handshake, or synchronous RAM control|[protocol-storage-patterns.md](references/protocol-storage-patterns.md)|
+|Rare global events, route-dominated registered controls, or physical replication|[physical-control-patterns.md](references/physical-control-patterns.md)|
 
 Prefer balanced trees, masks, one-hot selection, local state, fixed-width cases, and explicit register boundaries. Mux only fields consumed on the critical path.
 
@@ -143,7 +131,10 @@ Use the same configuration and constraints for A/B comparison. Re-query the exac
 
 Treat fixed-DCP frequency calculations as estimates. A positive WNS under one constraint proves closure at that constraint and does not prove the maximum frequency. A generated bitstream with negative WNS is still a timing failure.
 
-Read [case-studies.md](references/case-studies.md) for project-derived examples and failure modes.
+Read only the relevant section of
+[case-studies.md](references/case-studies.md) when comparing alternatives,
+reviewing a failed optimization, or checking a known counterexample. Do not load
+it for routine application of a closed pattern.
 
 ## Deliver
 

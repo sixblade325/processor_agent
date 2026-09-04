@@ -4,7 +4,7 @@ Architecture expresses the current processor properties and design goals chosen 
 
 ## Architecture entry
 
-`Architecture/README.md` is the human entry. Keep it short and include:
+`doc/Architecture/README.md` is the human entry. Keep it short and include:
 
 1. a concise processor portrait;
 2. the recommended reading order;

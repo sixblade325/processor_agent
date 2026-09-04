@@ -1,0 +1,34 @@
+{
+  "name": "processor-development-skills",
+  "version": "0.1.0",
+  "description": "Human-first processor architecture, Chisel implementation, verification, and FPGA timing skills for Codex.",
+  "author": {
+    "name": "Processor Agent Contributors"
+  },
+  "repository": "https://github.com/sixblade325/processor_agent",
+  "license": "Proprietary",
+  "keywords": [
+    "processor",
+    "chisel",
+    "rtl",
+    "verification",
+    "vivado"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Processor Development Skills",
+    "shortDescription": "Human-first processor design and Chisel engineering workflows.",
+    "longDescription": "A composable Skill Package for processor architecture, documentation, cycle-accurate Chisel design, implementation, verification, and Vivado timing analysis.",
+    "developerName": "Processor Agent Contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Bootstrap this processor project for Agent collaboration.",
+      "Review this processor design before Chisel implementation.",
+      "Trace this Vivado timing path back to Chisel RTL."
+    ]
+  }
+}

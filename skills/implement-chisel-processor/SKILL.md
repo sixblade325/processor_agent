@@ -1,6 +1,6 @@
 ---
 name: implement-chisel-processor
-description: Document-driven workflow for implementing and reviewing Chisel processor and memory-subsystem RTL. Use when Codex must work from approved architecture and design documents, reason in synthesized-hardware terms, avoid redundant or overprotective logic, add focused verification, or perform a static or verification review assigned by a workflow Harness.
+description: Document-driven workflow for implementing, reviewing, and verifying Chisel processor and memory-subsystem RTL. Use when Codex must work from maintained Architecture and Design, trace a complete integration surface, reason in synthesized-hardware terms, keep source-adjacent _codex.md summaries current, avoid redundant or overprotective logic, or run focused functional verification.
 ---
 
 # Implement Chisel Processor
@@ -9,16 +9,23 @@ description: Document-driven workflow for implementing and reviewing Chisel proc
 
 Read repository instructions first. Then locate and read, in order:
 
-1. Approved architecture and design documents.
-2. The current Task Envelope, allowed paths, and acceptance criteria.
-3. Current source, tests, generated reports, and relevant reference implementation.
+1. The Architecture documents that define target properties and boundaries.
+2. The current Design documents that define the concrete module, protocol, lifecycle, and cycle semantics.
+3. Current source, module-local notes, source-adjacent `_codex.md` summaries, tests, generated reports, and relevant reference implementation.
+4. The user's explicit task scope and acceptance criteria.
 
-Treat the user's latest correction as authoritative. Design documents define
-target behavior after applying accepted corrections; source defines current
-behavior. Report corrections not yet reflected in documents. Never silently
-resolve a conflict. State the target, current implementation, and migration.
+Treat explicit user decisions and the current Git authority as authoritative.
+Treat a later ordinary user statement as change intent unless the user clearly
+supersedes an existing fact. Architecture defines target properties, Design
+defines intended implementation, and Source plus Verification define proven
+current behavior. Never silently resolve a conflict. State the target, current
+implementation, evidence, and required migration.
 
-Do not modify approved Architecture or Design. Prefer their code fragments and naming. If a fragment has a syntax, type, timing, or semantic error, report the exact issue as a Design gap before changing its meaning.
+Do not modify Architecture or Design unless the current task authorizes those
+edits. Prefer their naming and interface fragments. If a fragment has a syntax,
+type, timing, or semantic error, report the exact Design gap before changing its
+meaning. Treat a module-local document without the `_codex` suffix as
+human-maintained unless project instructions assign different ownership.
 
 ## Confirm design closure
 
@@ -59,23 +66,48 @@ Before each added condition, field, register, or mux, determine whether existing
 
 Organize substantial Scala source with the repository's required functional separators. Add concise comments only for cycle contracts, non-obvious invariants, intentional redundancy left for synthesis, and timing-sensitive choices.
 
-## Respect workflow ownership
+## Maintain source summaries as a hard gate
 
-When a Harness provides a Task Envelope:
+The Agent maintains source-adjacent summaries. Every project-authored `.scala`
+source created or changed by the task must have a same-directory
+`<SourceBase>_codex.md` summary. Create a missing summary and update an existing
+summary in the same change. Generated, vendored, and third-party Scala sources
+are excluded unless the project explicitly owns them.
 
-- treat Architecture, Design, allowed paths, verification mode, and gates in the envelope as authoritative;
-- return only the artifact type requested by the assigned role;
-- do not create `_codex.md`, handoff files, review reports, or state files unless the envelope explicitly allows them;
-- submit a structured Design-gap response with a concrete counterexample when implementation cannot preserve the approved Design;
-- leave formal state transitions, file writes, evidence projection, worker dispatch, and role rotation to the Harness.
+Each summary records only implementation-facing facts:
+
+- source responsibility and governing Design links;
+- public interfaces and field semantics;
+- events, same-cycle priority, and state lifecycle;
+- producer, register boundary, consumer, and architectural side effects;
+- assertions, tests, evidence, timing risks, and unverified behavior.
+
+Keep the summary concise and maintainable. It describes the source and cannot
+override Architecture or Design. Before delivery, check every changed
+project-authored `.scala` path for its matching summary. The task is incomplete
+while any required summary is missing or stale.
 
 ## Verify and review
 
 Read [verification-review.md](references/verification-review.md). Add focused assertions and directed corner cases, then run Verilator as the default ChiselTest backend. Compilation alone is not verification.
 
-When assigned a static-review role, inspect source and documents for correctness, redundancy, overprotection, timing paths, dependency chains, assertion quality, and test gaps. When assigned a verification role, run or assess the approved commands and preserve commands, seeds, logs, failures, and concise conclusions.
+For a review-only task, inspect source and documents for correctness, redundancy,
+overprotection, timing paths, dependency chains, assertion quality, and test
+gaps without modifying files. For an implementation task, the active Agent owns
+the edit, focused verification, and final reconciliation.
 
-Do not dispatch additional agents from this Skill. The Harness chooses `independent_workers` or `active_only`, creates the required roles, and records whether evidence is independent.
+Dual-subagent verification is disabled by default. Enable it only when the user
+explicitly requests dual-subagent verification for the current task. Preserve
+these two independent roles when enabled:
+
+1. A static-review subagent performs a read-only source and document review.
+2. A verification subagent independently runs the approved tests and records raw evidence.
+
+Give both roles source paths, authority documents, the fixed baseline, and
+acceptance criteria. Do not give them an expected conclusion. If two independent
+subagents are unavailable, report that fact and do not claim independent
+verification. The active Agent resolves findings, applies authorized fixes,
+reruns affected tests, and updates every affected `_codex.md` summary.
 
 When an implementation task follows a failed review, address valid findings and rerun affected tests. Review roles report findings without modifying files. Do not report completion while required tests fail.
 
@@ -88,6 +120,8 @@ Report concisely:
 - reused reference structures and any new fields;
 - event priority, assertions, and deliberately omitted redundant logic;
 - timing risks and any remaining dependency chain with location and scale;
+- created or updated `_codex.md` summaries;
 - Verilator commands, seeds, cycle counts, results, and log paths;
-- Harness run ID, approved Design hash, and evidence paths supplied by the task;
+- whether dual-subagent verification remained disabled or was explicitly enabled;
+- Architecture and Design revisions or hashes used as authority;
 - unresolved issues or unverified behavior.

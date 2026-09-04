@@ -57,6 +57,15 @@
 - When does a Store become visible?
 - When may a Load clear a Store dependency?
 
+## MSHR and buffers
+
+- Is primary ownership unique per block?
+- Can secondary entries outlive queue entries?
+- Are release and secondary invalidation atomic?
+- Can an active transaction continue with no secondary?
+- Can such a transaction accidentally release an LSQ entry?
+- Are RB/VB ownership and bus transaction IDs separate from LSQ identity?
+
 ## Timing
 
 - Count compare lanes by queue length and issue width.

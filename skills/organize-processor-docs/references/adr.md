@@ -1,6 +1,6 @@
 # ADR Documents
 
-An ADR preserves durable rationale for a choice with meaningful alternatives and consequences. Place it under the authority root affected by the decision.
+An ADR preserves durable rationale for a choice with meaningful alternatives and consequences. Place it under `doc/Architecture/ADR/` or `doc/Design/ADR/` according to the authority affected by the decision.
 
 Use an Architecture ADR for processor properties, goals, external contracts, acceptance conditions, or permitted Design freedom.
 

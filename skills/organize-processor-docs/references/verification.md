@@ -4,7 +4,7 @@ Formal Verification documents are peers of Architecture and Design. Architecture
 
 ## Verification entry
 
-`Verification/README.md` should provide:
+`doc/Verification/README.md` should provide:
 
 1. verification levels and reading order;
 2. links from Architecture acceptance areas to verification specifications;
@@ -28,7 +28,7 @@ Cover the applicable items:
 
 ## Results and evidence
 
-Keep human summaries concise and immutable once bound to a commit. Store bulk stdout, stderr, waveforms, reports, and generated artifacts outside the prose document, then link them with hashes or stable result references.
+Keep human summaries concise and immutable once bound to a commit. Store maintainable result summaries under `doc/Verification/Results/` when useful. Store bulk stdout, stderr, waveforms, reports, and generated artifacts in `.runtime/`, then link them with hashes or stable result references.
 
 A result identifies the input commit, command or method, environment or toolchain, outcome, and evidence location. Waveform images, tool screenshots, and other evidence captures inherit this binding from their result entry or state it beside the capture. They do not require an editable diagram source. A failed result remains evidence and cannot be rewritten into a pass.
 

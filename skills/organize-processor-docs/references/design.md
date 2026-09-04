@@ -1,14 +1,14 @@
 # Design Documents
 
-Design expresses the current concrete processor realization. It owns logical topology, subsystem and module responsibilities, state, interfaces, cycle behavior, cross-module mechanisms, and implementation-facing invariants.
+Design expresses the current concrete processor realization. It owns physical module topology, subsystem and module responsibilities, state, interfaces, cycle behavior, cross-module mechanisms, and implementation-facing invariants.
 
 ## Design entry
 
-`Design/README.md` is the human entry. Include:
+`doc/Design/README.md` is the human entry. Include:
 
 1. the recommended reading order;
 2. links to principles and whole-processor overview;
-3. the logical topology and links to subsystem or module documents;
+3. the physical module topology and links to subsystem or module documents;
 4. links to cross-module Protocol and Lifecycle documents;
 5. an Architecture realization map containing links rather than copied properties;
 6. links to Design ADR and Verification entry points;
@@ -16,11 +16,35 @@ Design expresses the current concrete processor realization. It owns logical top
 
 Every current Design document must be reachable from this entry within two document links.
 
-## Logical topology
+## Directory shape
 
-Use the processor's stable logical ownership as the directory main axis. The user owns top-level subsystem and module concepts. Directory nesting may reflect whole processor, subsystem, module, and internal mechanism when those levels are meaningful.
+Use this conditional pattern:
 
-Do not derive the document tree from Work Packages, Agent assignments, source filenames, implementation order, or Harness state. Source and Design topology may differ physically; explicit links preserve correspondence.
+```text
+doc/Design/
+  README.md
+  OVERVIEW.md
+  <Subsystem>/
+    README.md
+    <Module>/
+      README.md
+      <InternalMechanism>.md
+  Protocols/
+  Lifecycles/
+  ADR/
+```
+
+Each shown child path is conditional. Create it only when it owns current content.
+
+## Physical module topology
+
+Use the stable Chisel or RTL structural hierarchy and responsibility boundaries as the Design directory main axis. Here physical module topology means instantiated structural topology, not post-placement physical layout. Align the Design module view as closely as possible with instantiated hardware modules and their ownership. Source filenames alone do not define this topology. Work Packages, Agent assignments, implementation order, and Harness state never define it.
+
+A stable instantiated module that owns an independent responsibility, state, interface, or maintenance lifecycle normally receives its own module directory and `README.md`. A parent subsystem or module `README.md` explains composition and links to its documented children. An overview that lists several independent state owners cannot replace their module authorities.
+
+Shared Bundles and types, generated code, thin wrappers, adapters, and deliberately co-located mechanisms may justify a different document boundary. Record every material difference with an explicit Design-to-Source mapping, its reason, and its maintenance consequence. A significant divergence requires user approval and a Design ADR. This skill reports an unexplained mismatch and does not authorize source restructuring.
+
+Protocols, Lifecycles, ADRs, and Verification remain orthogonal views. Link them to the module axis and keep their owned facts outside module summaries.
 
 ## Principles and overview
 
@@ -63,7 +87,7 @@ Use diagrams when topology, ownership, timing, or state transitions are material
 
 ## Split and merge
 
-Create an independent module document when the subject has stable responsibility, state ownership, interfaces, or an independent maintenance lifecycle. Keep small helpers inside the owning mechanism document.
+Create an independent module document when the subject has stable responsibility, state ownership, interfaces, or an independent maintenance lifecycle. For implemented designs, apply this rule to stable instantiated Chisel or RTL modules unless a documented exception above applies. Keep small helpers inside the owning mechanism document.
 
 Split a long module document by internal mechanism only when the extracted mechanism has its own state or reader question. Keep a short parent document that explains composition and links.
 

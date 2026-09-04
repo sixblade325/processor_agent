@@ -54,6 +54,85 @@ class CheckDocsTest(unittest.TestCase):
             [item["path"] for item in report["measurements"]],
         )
 
+    def test_canonical_doc_layout_and_overall_entry(self) -> None:
+        self.write(
+            "doc/README.md",
+            "# Documentation\n\n[Architecture](Architecture/README.md)\n\n"
+            "[Design](Design/README.md)\n\n"
+            "[Verification](Verification/README.md)\n",
+        )
+        self.write(
+            "doc/Architecture/README.md",
+            "# Architecture\n\n[目标](目标.md)\n",
+        )
+        self.write("doc/Architecture/目标.md", "# 目标\n")
+        self.write("doc/Design/README.md", "# Design\n\n[概述](OVERVIEW.md)\n")
+        self.write("doc/Design/OVERVIEW.md", "# Overview\n")
+        self.write("doc/Verification/README.md", "# Verification\n")
+
+        report = check_project(self.project)
+
+        self.assertTrue(report["ok"], report["issues"])
+        self.assertEqual(report["layout"], "doc")
+        self.assertEqual(
+            report["roots"],
+            ["doc/Architecture", "doc/Design", "doc/Verification"],
+        )
+        self.assertEqual(report["filesChecked"], 6)
+        self.assertNotIn("noncanonical_document_layout", self.codes(report))
+
+    def test_canonical_doc_layout_requires_overall_entry(self) -> None:
+        self.write("doc/Design/README.md", "# Design\n")
+
+        report = check_project(self.project)
+
+        self.assertFalse(report["ok"])
+        self.assertIn("missing_doc_entry", self.codes(report))
+
+    def test_overall_entry_must_link_each_domain_directly(self) -> None:
+        self.write("doc/README.md", "# Documentation\n\n[Design](Design/README.md)\n")
+        self.write("doc/Architecture/README.md", "# Architecture\n")
+        self.write("doc/Design/README.md", "# Design\n")
+
+        report = check_project(self.project)
+        domain_issues = [
+            item
+            for item in report["issues"]
+            if item["code"] == "document_domain_not_linked"
+        ]
+
+        self.assertEqual(len(domain_issues), 1)
+        self.assertIn("doc/Architecture/README.md", domain_issues[0]["message"])
+
+    def test_legacy_top_level_layout_warns(self) -> None:
+        self.write("Design/README.md", "# Design\n")
+
+        report = check_project(self.project)
+
+        self.assertTrue(report["ok"], report["issues"])
+        self.assertEqual(report["layout"], "legacy_top_level")
+        self.assertIn("noncanonical_document_layout", self.codes(report))
+
+    def test_canonical_and_top_level_domain_roots_are_rejected(self) -> None:
+        self.write("doc/README.md", "# Documentation\n\n[Design](Design/README.md)\n")
+        self.write("doc/Design/README.md", "# Design\n")
+        self.write("Design/README.md", "# Legacy Design\n")
+
+        report = check_project(self.project)
+
+        self.assertFalse(report["ok"])
+        self.assertIn("duplicate_document_root", self.codes(report))
+
+    def test_mixed_canonical_and_top_level_domains_are_rejected(self) -> None:
+        self.write("doc/README.md", "# Documentation\n\n[Design](Design/README.md)\n")
+        self.write("doc/Design/README.md", "# Design\n")
+        self.write("Architecture/README.md", "# Architecture\n")
+
+        report = check_project(self.project)
+
+        self.assertFalse(report["ok"])
+        self.assertIn("document_root_outside_doc", self.codes(report))
+
     def test_research_root_is_discovered(self) -> None:
         self.write("Research/README.md", "# Research\n\n[调研](调研.md)\n")
         self.write("Research/调研.md", "# 调研\n\n记录来源化证据。\n")
@@ -95,7 +174,7 @@ class CheckDocsTest(unittest.TestCase):
 
         self.assertTrue(report["ok"], report["issues"])
         self.assertIn("target_effective_chars_exceeded", self.codes(report))
-        self.assertEqual(report["warningCount"], 1)
+        self.assertEqual(report["warningCount"], 2)
         self.assertEqual(measurement["targetEffectiveChars"], 6000)
         self.assertEqual(measurement["targetNonBlankLines"], 140)
         self.assertEqual(measurement["hardEffectiveChars"], 10000)
@@ -381,6 +460,21 @@ class CheckDocsTest(unittest.TestCase):
         ]
         self.assertEqual(len(duplicate_issues), 1)
         self.assertEqual(duplicate_issues[0]["path"], "DesignCandidate")
+
+    def test_parallel_candidate_design_root_under_doc_is_rejected(self) -> None:
+        self.write("doc/README.md", "# Documentation\n\n[Design](Design/README.md)\n")
+        self.write("doc/Design/README.md", "# Design\n")
+        self.write("doc/DesignCandidate/README.md", "# Candidate Design\n")
+
+        report = check_project(self.project)
+        duplicate_issues = [
+            item
+            for item in report["issues"]
+            if item["code"] == "duplicate_current_tree"
+        ]
+
+        self.assertEqual(len(duplicate_issues), 1)
+        self.assertEqual(duplicate_issues[0]["path"], "doc/DesignCandidate")
 
 
 if __name__ == "__main__":
