@@ -84,12 +84,39 @@ MSYS2 UCRT64 只作为 Windows 内部的 Verilator、C++ 和 Make 工具链。�
 
 ## 正式 Skill
 
-- `bootstrap-processor-project`
-- `organize-processor-docs`
-- `design-chisel-processor`
-- `implement-chisel-processor`
-- `trace-vivado-timing-to-rtl`
-- `optimize-chisel-fpga-timing`
+```text
+Processor Development Skill Package
+├── bootstrap-processor-project
+├── organize-processor-docs
+├── design-chisel-processor
+├── implement-chisel-processor
+├── trace-vivado-timing-to-rtl
+└── optimize-chisel-fpga-timing
+```
+
+### 6.1 `bootstrap-processor-project`
+
+使用包内固定基线初始化用户项目根目录的 `AGENTS.md`。已有文件只形成增量建议，并在用户确认后修改。写入后由用户项目维护，后续包版本不自动覆盖。该 Skill 不创建文档目录，不探测或配置环境，不修改处理器源码。环境与工具链工作由确定性脚本承担。
+
+### 6.2 `organize-processor-docs`
+
+建立并维护人类和 Agent 共同使用的处理器文档范式。它负责文档角色、事实权威、阅读路径、长度预算、接口表达顺序、可维护性检查和渐进式脚手架。
+
+### 6.3 `design-chisel-processor`
+
+负责周期精确的微架构推理，闭合字段语义、状态生命周期、生产者与消费者、寄存器边界、异常路径、优先级和可验证不变量。
+
+### 6.4 `implement-chisel-processor`
+
+根据已确认的 Architecture 和 Design 实现 Chisel RTL、接口迁移、断言和定向测试，并报告设计缺口和未验证行为。
+
+### 6.5 `trace-vivado-timing-to-rtl`
+
+将 Vivado 物理时序证据映射到生成 RTL、Chisel 源码、流水线语义和路径家族，形成有证据约束的修改方向。
+
+### 6.6 `optimize-chisel-fpga-timing`
+
+根据周期契约和实现证据产生时序优化候选，通过 RTL、测试和实现结果验证收益及语义保持情况。
 
 ## 构建产物
 
